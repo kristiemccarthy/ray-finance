@@ -32,7 +32,7 @@
     "ray": "./dist/cli/index.js"
   },
   "scripts": {
-    "build": "tsc && rm -rf dist/public && cp -r src/public dist/public",
+    "build": "tsc && node -e \"const fs=require('fs');fs.rmSync('dist/public',{recursive:true,force:true});fs.cpSync('src/public','dist/public',{recursive:true});\"",
     "test": "vitest run",
     "prepublishOnly": "npm run build",
     "sync": "tsx src/daily-sync.ts"
