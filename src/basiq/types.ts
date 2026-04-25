@@ -479,6 +479,10 @@ export interface BasiqJob {
 
 // ---- Institution ----------------------------------------------------------
 
+// TODO: This type is incomplete. When we build the institution-filtering UI,
+// expand it to cover institutionType, stage, status, and expanded features
+// returned by /institutions. Leaving narrow for now to keep the smoke test
+// honest about what we've actually verified.
 /** A supported financial institution in Basiq's registry. */
 export interface BasiqInstitution {
   /** Always `"institution"`. */
@@ -489,7 +493,10 @@ export interface BasiqInstitution {
   name: string;
   /** Short code / abbreviation for the institution. */
   shortName: string;
-  /** ISO 3166-1 alpha-2 country code (e.g. `"AU"`). */
+  /**
+   * Country name as a full string (e.g. `"Australia"`).
+   * Note: this is NOT an ISO code despite plan documentation suggesting otherwise.
+   */
   country: string;
   /**
    * How data is retrieved: `"open-banking"` (CDR), `"web"` (screen-scrape),
@@ -539,7 +546,7 @@ export interface BasiqListResponse<T> {
   /** Always `"list"`. */
   type: "list";
   /** Total number of items matching the query (across all pages). */
-  count: number;
+  totalCount: number;
   /** Page size used for this response. */
   size: number;
   /** Array of resource objects for the current page. */
