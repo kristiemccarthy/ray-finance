@@ -1,0 +1,107 @@
+/**
+ * Basiq → Plaid Personal Finance Category (PFC) mapping.
+ *
+ * Ray's scoring, budgeting, and achievement code (Kitchen Hero, shopping
+ * streaks, food/shopping budgets, transfer exclusions, etc.) hard-codes
+ * Plaid PFC strings as its internal category vocabulary. To keep that code
+ * unchanged when swapping the provider layer to Basiq, every transaction
+ * pulled from Basiq must be translated into the equivalent Plaid PFC pair
+ * (`category` + `subcategory`) at the sync boundary.
+ *
+ * This table is intentionally narrow at first — it covers the categories
+ * that Ray's scoring logic actually keys off of. As real sandbox and
+ * production data flows through, expect to see Basiq category strings that
+ * aren't in `CATEGORY_MAP` yet; those will fall through to `DEFAULT_CATEGORY`
+ * and should be added here once we know what they represent.
+ *
+ * Note on transfers: `transfer` and `internal-transfer` default to
+ * `TRANSFER_OUT`. The actual direction (in vs out) depends on the
+ * transaction's sign and must be resolved by the transaction sync layer,
+ * not here.
+ */
+
+export type PlaidCategory = {
+  category: string;
+  subcategory: string;
+};
+
+export const DEFAULT_CATEGORY: PlaidCategory = {
+  category: "GENERAL_SERVICES",
+  subcategory: "OTHER",
+};
+
+export const CATEGORY_MAP: Record<string, PlaidCategory> = {
+  // --- Food & drink ----------------------------------------------------
+  "restaurants-and-cafes": { category: "FOOD_AND_DRINK", subcategory: "RESTAURANT" },
+  "takeaway": { category: "FOOD_AND_DRINK", subcategory: "FAST_FOOD" },
+  "fast-food": { category: "FOOD_AND_DRINK", subcategory: "FAST_FOOD" },
+  "coffee-shops": { category: "FOOD_AND_DRINK", subcategory: "COFFEE" },
+  "groceries": { category: "FOOD_AND_DRINK", subcategory: "GROCERIES" },
+  "supermarkets": { category: "FOOD_AND_DRINK", subcategory: "GROCERIES" },
+  "bars-and-pubs": { category: "FOOD_AND_DRINK", subcategory: "ALCOHOL" },
+
+  // --- General merchandise --------------------------------------------
+  "clothing-and-accessories": { category: "GENERAL_MERCHANDISE", subcategory: "CLOTHING" },
+  "department-stores": { category: "GENERAL_MERCHANDISE", subcategory: "DEPARTMENT_STORES" },
+  "electronics": { category: "GENERAL_MERCHANDISE", subcategory: "ELECTRONICS" },
+  "online-shopping": { category: "GENERAL_MERCHANDISE", subcategory: "ONLINE_MARKETPLACES" },
+  "home-improvement": { category: "GENERAL_MERCHANDISE", subcategory: "HOME_IMPROVEMENT" },
+  "toys-and-games": { category: "GENERAL_MERCHANDISE", subcategory: "TOYS" },
+
+  // --- Transportation -------------------------------------------------
+  "petrol": { category: "TRANSPORTATION", subcategory: "GAS" },
+  "fuel": { category: "TRANSPORTATION", subcategory: "GAS" },
+  "public-transport": { category: "TRANSPORTATION", subcategory: "PUBLIC_TRANSIT" },
+  "taxi-and-rideshare": { category: "TRANSPORTATION", subcategory: "TAXIS_AND_RIDE_SHARES" },
+  "parking": { category: "TRANSPORTATION", subcategory: "PARKING" },
+
+  // --- Transfers ------------------------------------------------------
+  // Default to OUT; the sync layer must flip to TRANSFER_IN based on sign.
+  "transfer": { category: "TRANSFER_OUT", subcategory: "ACCOUNT_TRANSFER" },
+  "internal-transfer": { category: "TRANSFER_OUT", subcategory: "ACCOUNT_TRANSFER" },
+  "bpay": { category: "TRANSFER_OUT", subcategory: "OTHER_TRANSFER_OUT" },
+
+  // --- Loan payments --------------------------------------------------
+  "loan-repayment": { category: "LOAN_PAYMENTS", subcategory: "PERSONAL_LOAN" },
+  "mortgage-payment": { category: "LOAN_PAYMENTS", subcategory: "MORTGAGE" },
+  "credit-card-payment": { category: "LOAN_PAYMENTS", subcategory: "CREDIT_CARD" },
+
+  // --- Entertainment & personal care ----------------------------------
+  "entertainment": { category: "ENTERTAINMENT", subcategory: "OTHER_ENTERTAINMENT" },
+  "streaming-services": { category: "ENTERTAINMENT", subcategory: "TV_AND_MOVIES" },
+  "gyms-and-fitness": { category: "PERSONAL_CARE", subcategory: "GYMS_AND_FITNESS" },
+
+  // --- Bills & services -----------------------------------------------
+  "utilities": { category: "RENT_AND_UTILITIES", subcategory: "OTHER_UTILITIES" },
+  "telecommunications": { category: "RENT_AND_UTILITIES", subcategory: "TELEPHONE" },
+  "internet": { category: "RENT_AND_UTILITIES", subcategory: "INTERNET_AND_CABLE" },
+  "insurance": { category: "GENERAL_SERVICES", subcategory: "INSURANCE" },
+  "rent": { category: "RENT_AND_UTILITIES", subcategory: "RENT" },
+
+  // --- Income ---------------------------------------------------------
+  "salary": { category: "INCOME", subcategory: "WAGES" },
+  "wages": { category: "INCOME", subcategory: "WAGES" },
+  "government-benefit": { category: "INCOME", subcategory: "OTHER_INCOME" },
+};
+
+/**
+ * Translate a Basiq category string into the Plaid PFC pair Ray expects.
+ *
+ * - Case-insensitive (input is normalised to lowercase before lookup).
+ * - Returns `DEFAULT_CATEGORY` for `null`, `undefined`, empty string, or
+ *   any value not present in `CATEGORY_MAP`.
+ */
+export function mapBasiqCategory(
+  basiqCategory: string | null | undefined,
+): PlaidCategory {
+  if (!basiqCategory) {
+    return DEFAULT_CATEGORY;
+  }
+
+  const key = basiqCategory.trim().toLowerCase();
+  if (!key) {
+    return DEFAULT_CATEGORY;
+  }
+
+  return CATEGORY_MAP[key] ?? DEFAULT_CATEGORY;
+}
