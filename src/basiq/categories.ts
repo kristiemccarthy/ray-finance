@@ -105,3 +105,222 @@ export function mapBasiqCategory(
 
   return CATEGORY_MAP[key] ?? DEFAULT_CATEGORY;
 }
+
+// ---------------------------------------------------------------------------
+// Description-based fallback
+// ---------------------------------------------------------------------------
+
+/**
+ * Hand-curated description-matching rules for Australian merchants. Used
+ * when Basiq's enrichment is disabled (sandbox) or simply absent on a given
+ * transaction. Order is significant — rules are evaluated top-to-bottom and
+ * the first match wins, so more-specific patterns must precede broader
+ * ones (e.g. `"UBER EATS"` must come before `"UBER "`).
+ *
+ * Patterns are uppercase substring matches against a normalised
+ * description (uppercased, internal whitespace collapsed). Trailing spaces
+ * in patterns like `"BP "`, `"UBER "`, `"OLA "`, `"AGL "`, `"TARGET "` are
+ * deliberate — they prevent false matches against unrelated words that
+ * start with the same letters.
+ */
+interface DescriptionRule {
+  patterns: string[];
+  result: PlaidCategory;
+}
+
+const DESCRIPTION_RULES: DescriptionRule[] = [
+  // --- Income (most specific first) -----------------------------------
+  {
+    patterns: ["SALARY", "WAGE", "DEPOSIT-SALARY", "PAYG"],
+    result: { category: "INCOME", subcategory: "WAGES" },
+  },
+  {
+    patterns: ["CENTRELINK", "GOVERNMENT BENEFIT"],
+    result: { category: "INCOME", subcategory: "OTHER_INCOME" },
+  },
+  {
+    patterns: ["INTEREST PAID", "INTEREST CREDIT"],
+    result: { category: "INCOME", subcategory: "INTEREST_EARNED" },
+  },
+
+  // --- Transfers ------------------------------------------------------
+  // Direction (TRANSFER_OUT vs TRANSFER_IN) is resolved at the mapper
+  // layer based on the transaction's sign, not here.
+  {
+    patterns: ["TRANSFER TO", "TRANSFER FROM", "INTERNAL TRANSFER", "TFR"],
+    result: { category: "TRANSFER_OUT", subcategory: "ACCOUNT_TRANSFER" },
+  },
+  {
+    patterns: ["BPAY"],
+    result: { category: "TRANSFER_OUT", subcategory: "OTHER_TRANSFER_OUT" },
+  },
+  {
+    patterns: ["PAYMENT RECEIVED"],
+    result: { category: "TRANSFER_IN", subcategory: "ACCOUNT_TRANSFER" },
+  },
+
+  // --- Loan payments --------------------------------------------------
+  {
+    patterns: ["LOAN REPAYMENT", "LOAN PAYMENT"],
+    result: { category: "LOAN_PAYMENTS", subcategory: "PERSONAL_LOAN" },
+  },
+  {
+    patterns: ["MORTGAGE"],
+    result: { category: "LOAN_PAYMENTS", subcategory: "MORTGAGE" },
+  },
+  {
+    patterns: ["CREDIT CARD PMT", "CREDIT CARD PAYMENT"],
+    result: { category: "LOAN_PAYMENTS", subcategory: "CREDIT_CARD" },
+  },
+
+  // --- Food & drink (Australian merchants) ----------------------------
+  {
+    patterns: ["WOOLWORTHS", "WOOLIES", "COLES", "ALDI", "IGA", "HARRIS FARM"],
+    result: { category: "FOOD_AND_DRINK", subcategory: "GROCERIES" },
+  },
+  {
+    patterns: [
+      "MCDONALDS",
+      "KFC",
+      "HUNGRY JACK",
+      "DOMINO",
+      "PIZZA HUT",
+      "RED ROOSTER",
+      "SUBWAY",
+      "GUZMAN",
+      "OPORTO",
+      "GRILL'D",
+    ],
+    result: { category: "FOOD_AND_DRINK", subcategory: "FAST_FOOD" },
+  },
+  {
+    // UBER EATS must precede the bare "UBER " transport rule below.
+    // Card processors mangle the merchant string with asterisks (e.g.
+    // "UBER *EATS Sydney AUS"), so we list every observed punctuation
+    // variant here rather than reaching for regex.
+    patterns: [
+      "UBER EATS",
+      "UBEREATS",
+      "UBER *EATS",
+      "UBER* EATS",
+      "UBER*EATS",
+      "MENULOG",
+      "DELIVEROO",
+      "DOORDASH",
+    ],
+    result: { category: "FOOD_AND_DRINK", subcategory: "FAST_FOOD" },
+  },
+  {
+    patterns: ["STARBUCKS", "GLORIA JEAN", "CAFE", "ESPRESSO"],
+    result: { category: "FOOD_AND_DRINK", subcategory: "COFFEE" },
+  },
+  {
+    patterns: ["BWS", "DAN MURPHY", "LIQUORLAND", "FIRST CHOICE"],
+    result: { category: "FOOD_AND_DRINK", subcategory: "ALCOHOL" },
+  },
+  {
+    patterns: ["7-ELEVEN", "AMPOL", "BP ", "CALTEX", "SHELL", "UNITED PETROLEUM"],
+    result: { category: "TRANSPORTATION", subcategory: "GAS" },
+  },
+
+  // --- Transport ------------------------------------------------------
+  {
+    patterns: ["UBER ", "DIDI", "OLA "],
+    result: { category: "TRANSPORTATION", subcategory: "TAXIS_AND_RIDE_SHARES" },
+  },
+  {
+    patterns: ["OPAL", "MYKI", "GO CARD", "TRANSPORT FOR NSW"],
+    result: { category: "TRANSPORTATION", subcategory: "PUBLIC_TRANSIT" },
+  },
+  {
+    patterns: ["WILSON PARKING", "CARE PARK", "SECURE PARKING"],
+    result: { category: "TRANSPORTATION", subcategory: "PARKING" },
+  },
+
+  // --- Entertainment --------------------------------------------------
+  {
+    patterns: [
+      "NETFLIX",
+      "STAN",
+      "DISNEY+",
+      "DISNEY PLUS",
+      "PRIME VIDEO",
+      "BINGE",
+      "FOXTEL",
+    ],
+    result: { category: "ENTERTAINMENT", subcategory: "TV_AND_MOVIES" },
+  },
+  {
+    patterns: ["SPOTIFY", "APPLE MUSIC", "YOUTUBE PREMIUM", "YOUTUBE MUSIC"],
+    result: { category: "ENTERTAINMENT", subcategory: "MUSIC" },
+  },
+  {
+    patterns: ["EB GAMES", "STEAM", "PLAYSTATION", "NINTENDO", "XBOX"],
+    result: { category: "ENTERTAINMENT", subcategory: "VIDEO_GAMES" },
+  },
+
+  // --- General merchandise --------------------------------------------
+  {
+    patterns: ["KMART", "BIG W", "TARGET ", "MYER", "DAVID JONES"],
+    result: { category: "GENERAL_MERCHANDISE", subcategory: "DEPARTMENT_STORES" },
+  },
+  {
+    patterns: [
+      "JB HI-FI",
+      "JB HIFI",
+      "OFFICEWORKS",
+      "HARVEY NORMAN",
+      "THE GOOD GUYS",
+    ],
+    result: { category: "GENERAL_MERCHANDISE", subcategory: "ELECTRONICS" },
+  },
+  {
+    patterns: ["BUNNINGS", "MITRE 10"],
+    result: { category: "GENERAL_MERCHANDISE", subcategory: "HOME_IMPROVEMENT" },
+  },
+  {
+    patterns: ["AMAZON.COM.AU", "AMAZON AU", "EBAY"],
+    result: { category: "GENERAL_MERCHANDISE", subcategory: "ONLINE_MARKETPLACES" },
+  },
+
+  // --- Bills & services -----------------------------------------------
+  {
+    patterns: ["TELSTRA", "OPTUS", "VODAFONE", "TPG", "BELONG", "AUSSIE BROADBAND"],
+    result: { category: "RENT_AND_UTILITIES", subcategory: "TELEPHONE" },
+  },
+  {
+    patterns: ["AGL ", "ORIGIN ENERGY", "ENERGY AUSTRALIA"],
+    result: { category: "RENT_AND_UTILITIES", subcategory: "GAS_AND_ELECTRICITY" },
+  },
+  {
+    patterns: ["SYDNEY WATER", "MELBOURNE WATER"],
+    result: { category: "RENT_AND_UTILITIES", subcategory: "WATER" },
+  },
+];
+
+/**
+ * Best-effort categorisation from a raw transaction description, used as
+ * a fallback when Basiq's enrichment is unavailable.
+ *
+ * Returns `null` if the description is missing/empty or no rule matches —
+ * callers decide what to do with the miss (typically: fall back to
+ * `DEFAULT_CATEGORY`).
+ */
+export function categoriseFromDescription(
+  description: string | null | undefined,
+): PlaidCategory | null {
+  if (!description) return null;
+
+  const normalised = description.toUpperCase().replace(/\s+/g, " ").trim();
+  if (!normalised) return null;
+
+  for (const rule of DESCRIPTION_RULES) {
+    for (const pattern of rule.patterns) {
+      if (normalised.includes(pattern)) {
+        return rule.result;
+      }
+    }
+  }
+
+  return null;
+}

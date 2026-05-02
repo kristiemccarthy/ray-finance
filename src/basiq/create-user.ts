@@ -1,9 +1,9 @@
-// One-off script to create a Basiq user.
+// Reusable utility for creating Basiq sandbox users. Run when you need a
+// fresh user to test the consent flow with.
 // Run with:
 //   BASIQ_API_KEY=... npx tsx src/basiq/create-user.ts
 // Optional overrides:
 //   BASIQ_USER_EMAIL=...  BASIQ_USER_MOBILE=+614...
-// Delete this file once the userId has been captured into ~/.ray/config.json.
 
 import { BasiqClient } from "./client.js";
 import type { BasiqUser } from "./types.js";
