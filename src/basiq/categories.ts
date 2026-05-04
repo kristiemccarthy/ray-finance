@@ -142,6 +142,10 @@ const DESCRIPTION_RULES: DescriptionRule[] = [
     patterns: ["INTEREST PAID", "INTEREST CREDIT"],
     result: { category: "INCOME", subcategory: "INTEREST_EARNED" },
   },
+  {
+    patterns: ["CREDIT INTEREST"],
+    result: { category: "INCOME", subcategory: "INTEREST_EARNED" },
+  },
 
   // --- Transfers ------------------------------------------------------
   // Direction (TRANSFER_OUT vs TRANSFER_IN) is resolved at the mapper
@@ -251,12 +255,46 @@ const DESCRIPTION_RULES: DescriptionRule[] = [
     result: { category: "ENTERTAINMENT", subcategory: "TV_AND_MOVIES" },
   },
   {
+    // AMZNPRIMEA is the merchant string Amazon Prime AU prints on cards.
+    // Sits in the entertainment block ahead of the AMAZON.COM.AU rule
+    // below so a Prime renewal isn't miscategorised as shopping.
+    patterns: ["AMZNPRIMEA", "AMAZON PRIME"],
+    result: { category: "ENTERTAINMENT", subcategory: "TV_AND_MOVIES" },
+  },
+  {
+    patterns: ["AUDIBLE"],
+    result: { category: "ENTERTAINMENT", subcategory: "TV_AND_MOVIES" },
+  },
+  {
     patterns: ["SPOTIFY", "APPLE MUSIC", "YOUTUBE PREMIUM", "YOUTUBE MUSIC"],
     result: { category: "ENTERTAINMENT", subcategory: "MUSIC" },
   },
   {
     patterns: ["EB GAMES", "STEAM", "PLAYSTATION", "NINTENDO", "XBOX"],
     result: { category: "ENTERTAINMENT", subcategory: "VIDEO_GAMES" },
+  },
+
+  // --- Medical / pharmacy ---------------------------------------------
+  {
+    patterns: [
+      "TERRYWHITE",
+      "TERRY WHITE",
+      "CHEMMART",
+      "CHEMIST WAREHOUSE",
+      "PRICELINE PHARMACY",
+      "BLOOMS THE CHEMIST",
+    ],
+    result: { category: "MEDICAL", subcategory: "PHARMACIES_AND_SUPPLEMENTS" },
+  },
+  {
+    patterns: ["MOVE360"],
+    result: { category: "MEDICAL", subcategory: "OTHER_MEDICAL" },
+  },
+  {
+    // Vet bills land in MEDICAL — Plaid PFC has no separate pet-medical
+    // category, so we route them through the general medical bucket.
+    patterns: ["SWIFT EMERGENCY", "VET CLINIC", "VETERINARY"],
+    result: { category: "MEDICAL", subcategory: "OTHER_MEDICAL" },
   },
 
   // --- General merchandise --------------------------------------------
@@ -279,6 +317,16 @@ const DESCRIPTION_RULES: DescriptionRule[] = [
     result: { category: "GENERAL_MERCHANDISE", subcategory: "HOME_IMPROVEMENT" },
   },
   {
+    patterns: ["PETSTOCK", "PETBARN", "PET STOCK", "PET BARN"],
+    result: { category: "GENERAL_MERCHANDISE", subcategory: "OTHER_GENERAL_MERCHANDISE" },
+  },
+  {
+    // PayPal Pay-in-4 instalments — the underlying purchase is unknown,
+    // so OTHER_GENERAL_MERCHANDISE is the most honest bucket.
+    patterns: ["PYPL PAYIN4", "PAYPAL PAY IN 4"],
+    result: { category: "GENERAL_MERCHANDISE", subcategory: "OTHER_GENERAL_MERCHANDISE" },
+  },
+  {
     patterns: ["AMAZON.COM.AU", "AMAZON AU", "EBAY"],
     result: { category: "GENERAL_MERCHANDISE", subcategory: "ONLINE_MARKETPLACES" },
   },
@@ -289,12 +337,87 @@ const DESCRIPTION_RULES: DescriptionRule[] = [
     result: { category: "RENT_AND_UTILITIES", subcategory: "TELEPHONE" },
   },
   {
+    // OCCOM is a small AU ISP; `EZI*` is the BPAY intermediary's prefix.
+    patterns: ["EZI*OCCOM", "OCCOM"],
+    result: { category: "RENT_AND_UTILITIES", subcategory: "INTERNET_AND_CABLE" },
+  },
+  {
     patterns: ["AGL ", "ORIGIN ENERGY", "ENERGY AUSTRALIA"],
+    result: { category: "RENT_AND_UTILITIES", subcategory: "GAS_AND_ELECTRICITY" },
+  },
+  {
+    // Card-processor mangling of Arc Energy (`EZI*` prefix is the BPAY
+    // intermediary's tag).
+    patterns: ["EZI*ARC ENERGY", "ARC ENERGY"],
     result: { category: "RENT_AND_UTILITIES", subcategory: "GAS_AND_ELECTRICITY" },
   },
   {
     patterns: ["SYDNEY WATER", "MELBOURNE WATER"],
     result: { category: "RENT_AND_UTILITIES", subcategory: "WATER" },
+  },
+  {
+    patterns: ["VERA LIVING"],
+    result: { category: "RENT_AND_UTILITIES", subcategory: "RENT" },
+  },
+
+  // --- Insurance ------------------------------------------------------
+  {
+    patterns: ["YOUI", "PET INSURANCE"],
+    result: { category: "GENERAL_SERVICES", subcategory: "INSURANCE" },
+  },
+
+  // --- Digital services / AI tools ------------------------------------
+  {
+    patterns: ["OPENAI", "CHATGPT", "CLAUDE.AI", "ANTHROPIC"],
+    result: { category: "GENERAL_SERVICES", subcategory: "OTHER_GENERAL_SERVICES" },
+  },
+
+  // --- Cash withdrawals -----------------------------------------------
+  // Cash is genuinely uncategorisable — we don't know what it was for.
+  // OTHER_GENERAL_SERVICES is the most honest bucket.
+  {
+    patterns: ["ATM WITHDRAWAL", "CASH WITHDRAWAL"],
+    result: { category: "GENERAL_SERVICES", subcategory: "OTHER_GENERAL_SERVICES" },
+  },
+
+  // --- Bank fees ------------------------------------------------------
+  {
+    patterns: [
+      "FOREIGN CURRENCY CONVERSN FEE",
+      "INTERNATIONAL TRANSACTION FEE",
+      "FOREIGN TRANSACTION FEE",
+      "ATM FEE",
+      "ACCOUNT FEE",
+      "ACCOUNT KEEPING FEE",
+    ],
+    result: { category: "BANK_FEES", subcategory: "OTHER_BANK_FEES" },
+  },
+
+  // --- Generic bank-transfer fallback ---------------------------------
+  // These patterns describe HOW money moved (Osko, internet banking)
+  // rather than WHO it went to, so they're intentionally evaluated AFTER
+  // every merchant-specific rule above. An Osko payment to "VERA LIVING"
+  // will match the rent rule first; only payments with no merchant
+  // signal fall through to here.
+  {
+    patterns: [
+      "INTERNET DEPOSIT",
+      "INTERNET WITHDRAWAL",
+      "OSKO DEPOSIT",
+      "OSKO WITHDRAWAL",
+    ],
+    result: { category: "TRANSFER_OUT", subcategory: "ACCOUNT_TRANSFER" },
+  },
+  {
+    // VLT001574 is the user's specific Vera Living tenant reference.
+    // It appears on the credit/receiving side of monthly rent
+    // transactions (e.g. "Kristie Mccarthy Vlt001574"). Categorising
+    // these as Transfer keeps them out of the rent total — the outgoing
+    // payment to "VERA LIVING" already counts as Rent above. Sits with
+    // the bottom-tier transfer fallbacks so a description containing
+    // both "VERA LIVING" and "VLT001574" still hits the rent rule first.
+    patterns: ["VLT001574"],
+    result: { category: "TRANSFER_OUT", subcategory: "ACCOUNT_TRANSFER" },
   },
 ];
 
