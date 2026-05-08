@@ -35,6 +35,24 @@ export class ParseError extends Error {
 
 const REQUIRED_HEADERS = ["Date", "Description", "Debit", "Credit", "Balance"] as const;
 
+/**
+ * Map a *substring* in the bank's raw description to the canonical descriptor
+ * we want stored. Used to merge streams that an upstream rename has
+ * fragmented — the recurring detector groups by normalised description, so
+ * two descriptors for the same payment look like two different streams.
+ *
+ * Lookup is case-insensitive substring (`includes`) on the original
+ * description; the replacement is the *complete* descriptor that overwrites
+ * the row's `description` field.
+ */
+const DESCRIPTION_ALIASES: Record<string, string> = {
+  // Employer renamed payroll system from Proceder to Dayforce on/around
+  // 2026-04-23. Same payment, same cadence, just different descriptor.
+  // Map the new descriptor to the old one so the recurring detector
+  // recognises them as one continuous stream.
+  "uniting transact payroll": "Uniting (Nsw.Act 032425000000000000",
+};
+
 // ---------------------------------------------------------------------------
 // Parser implementation
 // ---------------------------------------------------------------------------
@@ -79,7 +97,9 @@ export const parseStGeorge: Parser = {
       const record = records[i];
 
       const date = parseDate(record.Date ?? "", lineNumber);
-      const description = normaliseDescription(record.Description ?? "");
+      const description = applyAliases(
+        normaliseDescription(record.Description ?? ""),
+      );
       const debit = parseAmountField(record.Debit ?? "", "Debit", lineNumber);
       const credit = parseAmountField(record.Credit ?? "", "Credit", lineNumber);
       const amount = composeAmount(debit, credit, lineNumber);
@@ -179,4 +199,20 @@ function parseBalance(field: string): number | null {
 
 function normaliseDescription(field: string): string {
   return field.trim().replace(/\s+/g, " ");
+}
+
+/**
+ * Rewrite descriptions that match a known alias substring (case-insensitive)
+ * to a canonical descriptor. The full original is replaced by the alias
+ * value — so two raw descriptors for the same recurring payment collapse
+ * into one. Returns the input unchanged if no alias matches.
+ */
+function applyAliases(description: string): string {
+  const lower = description.toLowerCase();
+  for (const [needle, replacement] of Object.entries(DESCRIPTION_ALIASES)) {
+    if (lower.includes(needle)) {
+      return replacement;
+    }
+  }
+  return description;
 }

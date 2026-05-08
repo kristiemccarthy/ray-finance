@@ -166,7 +166,9 @@ export function migrate(db: Database.Database): void {
       amount REAL NOT NULL,
       day_of_month INTEGER,
       type TEXT,
-      account_id TEXT
+      account_id TEXT,
+      frequency TEXT NOT NULL DEFAULT 'monthly',
+      next_due_date TEXT
     );
 
     CREATE TABLE IF NOT EXISTS milestones (
@@ -262,6 +264,16 @@ export function migrate(db: Database.Database): void {
     db.exec(`ALTER TABLE liabilities ADD COLUMN expected_payoff_date TEXT`);
     db.exec(`ALTER TABLE liabilities ADD COLUMN ytd_interest_paid REAL`);
     db.exec(`ALTER TABLE liabilities ADD COLUMN ytd_principal_paid REAL`);
+  }
+
+  // Migrate: add frequency + next_due_date to recurring_bills so bills can
+  // be scheduled fortnightly or weekly from a known anchor date instead of
+  // being limited to a day-of-month. Existing rows default to 'monthly',
+  // which preserves day_of_month behaviour.
+  const billCols = db.prepare(`PRAGMA table_info(recurring_bills)`).all() as { name: string }[];
+  if (!billCols.some(c => c.name === "frequency")) {
+    db.exec(`ALTER TABLE recurring_bills ADD COLUMN frequency TEXT NOT NULL DEFAULT 'monthly'`);
+    db.exec(`ALTER TABLE recurring_bills ADD COLUMN next_due_date TEXT`);
   }
 
   // Migrate: rebuild recurring table to use Plaid stream schema

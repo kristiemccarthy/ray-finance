@@ -143,15 +143,43 @@ export function getUpcomingBills(db: Database.Database, days: number): UpcomingB
     }
   }
 
-  // 3. Manual recurring_bills (month/day schedule)
+  // 3. Manual recurring_bills — three cadences:
+  //    - monthly: emit the next match of `day_of_month` strictly after today
+  //      if it lands in the window (single occurrence, matching the long-
+  //      standing behaviour for credit/liability dates above).
+  //    - fortnightly / weekly: emit *every* occurrence in the window, walked
+  //      from `next_due_date` in 14- or 7-day steps. A fortnightly bill in a
+  //      60-day window should show up four times, not once.
+  //    Rows missing the field their cadence requires are skipped silently.
   const manual = db.prepare(
-    `SELECT name, amount, day_of_month FROM recurring_bills WHERE day_of_month IS NOT NULL`
-  ).all() as { name: string; amount: number; day_of_month: number }[];
+    `SELECT name, amount, day_of_month, frequency, next_due_date FROM recurring_bills`
+  ).all() as {
+    name: string;
+    amount: number;
+    day_of_month: number | null;
+    frequency: string;
+    next_due_date: string | null;
+  }[];
 
   for (const m of manual) {
-    const next = nextDayOfMonthDate(today, m.day_of_month);
-    if (next < windowStart || next > windowEnd) continue;
-    bills.push({ date: next, name: m.name, amount: m.amount, source: "manual" });
+    if (m.frequency === "monthly") {
+      if (m.day_of_month === null) continue;
+      const next = nextDayOfMonthDate(today, m.day_of_month);
+      if (next < windowStart || next > windowEnd) continue;
+      bills.push({ date: next, name: m.name, amount: m.amount, source: "manual" });
+    } else if (m.frequency === "fortnightly" || m.frequency === "weekly") {
+      if (!m.next_due_date) continue;
+      const intervalDays = m.frequency === "fortnightly" ? 14 : 7;
+      let d = new Date(m.next_due_date + "T00:00:00Z");
+      if (isNaN(d.getTime())) continue;
+      // Fast-forward to the first occurrence on or after windowStart, then
+      // emit every occurrence up to windowEnd inclusive.
+      while (d < windowStart) d = addDays(d, intervalDays);
+      while (d <= windowEnd) {
+        bills.push({ date: d, name: m.name, amount: m.amount, source: "manual" });
+        d = addDays(d, intervalDays);
+      }
+    }
   }
 
   bills.sort((a, b) => a.date.getTime() - b.date.getTime());
