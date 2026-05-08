@@ -135,6 +135,14 @@ const DESCRIPTION_RULES: DescriptionRule[] = [
     result: { category: "INCOME", subcategory: "WAGES" },
   },
   {
+    // AccessPay salary-packaging top-ups. "Card funded" is the descriptor
+    // the AccessPay PDF statement uses for a salary-driven card load — it
+    // doesn't contain the literal word "salary" so it'd otherwise miss the
+    // rule above.
+    patterns: ["CARD FUNDED", "ACCESSPAY", "SALARY PACKAGING", "SALARY SACRIFICE"],
+    result: { category: "INCOME", subcategory: "WAGES" },
+  },
+  {
     patterns: ["CENTRELINK", "GOVERNMENT BENEFIT"],
     result: { category: "INCOME", subcategory: "OTHER_INCOME" },
   },
@@ -223,6 +231,21 @@ const DESCRIPTION_RULES: DescriptionRule[] = [
     result: { category: "FOOD_AND_DRINK", subcategory: "ALCOHOL" },
   },
   {
+    // Independent restaurants and small food merchants. Unlike the
+    // fast-food rule above, these are sit-down / table-service venues.
+    patterns: [
+      "GRAND LOTUS",
+      "ISPA KEBABS",
+      "SMP*LION ROCK",
+      "LION ROCK",
+      "ZOUKI",
+      "RHG PTY LTD",
+      "RNSH THE CORNER SHOP",
+      "CHOP BUTCHERY",
+    ],
+    result: { category: "FOOD_AND_DRINK", subcategory: "RESTAURANT" },
+  },
+  {
     patterns: ["7-ELEVEN", "AMPOL", "BP ", "CALTEX", "SHELL", "UNITED PETROLEUM"],
     result: { category: "TRANSPORTATION", subcategory: "GAS" },
   },
@@ -240,6 +263,18 @@ const DESCRIPTION_RULES: DescriptionRule[] = [
     patterns: ["WILSON PARKING", "CARE PARK", "SECURE PARKING"],
     result: { category: "TRANSPORTATION", subcategory: "PARKING" },
   },
+  {
+    // Australian toll-road operators.
+    patterns: ["LINKT", "E-WAY TOLLS", "ROAM EXPRESS", "TOLL ROAD"],
+    result: { category: "TRANSPORTATION", subcategory: "TOLL_AND_PARKING" },
+  },
+  {
+    // OTPS / OTPS Group is a disability-transport provider that bills via
+    // EFTPOS. No specific Plaid PFC subcategory exists; OTHER_TRANSPORTATION
+    // is the closest fit.
+    patterns: ["OTPS GROUP", "OTPS"],
+    result: { category: "TRANSPORTATION", subcategory: "OTHER_TRANSPORTATION" },
+  },
 
   // --- Entertainment --------------------------------------------------
   {
@@ -248,6 +283,7 @@ const DESCRIPTION_RULES: DescriptionRule[] = [
       "STAN",
       "DISNEY+",
       "DISNEY PLUS",
+      "DISNEYPLUS",
       "PRIME VIDEO",
       "BINGE",
       "FOXTEL",
@@ -281,6 +317,8 @@ const DESCRIPTION_RULES: DescriptionRule[] = [
       "TERRY WHITE",
       "CHEMMART",
       "CHEMIST WAREHOUSE",
+      "CHEMISTWAREHOUSE",
+      "CINCOTTA",
       "PRICELINE PHARMACY",
       "BLOOMS THE CHEMIST",
     ],
@@ -327,7 +365,13 @@ const DESCRIPTION_RULES: DescriptionRule[] = [
     result: { category: "GENERAL_MERCHANDISE", subcategory: "OTHER_GENERAL_MERCHANDISE" },
   },
   {
-    patterns: ["AMAZON.COM.AU", "AMAZON AU", "EBAY"],
+    patterns: [
+      "AMAZON.COM.AU",
+      "AMAZON AU",
+      "AMAZON AU RETAIL",
+      "AMAZON MARKETPLACE",
+      "EBAY",
+    ],
     result: { category: "GENERAL_MERCHANDISE", subcategory: "ONLINE_MARKETPLACES" },
   },
 
@@ -368,7 +412,26 @@ const DESCRIPTION_RULES: DescriptionRule[] = [
 
   // --- Digital services / AI tools ------------------------------------
   {
-    patterns: ["OPENAI", "CHATGPT", "CLAUDE.AI", "ANTHROPIC"],
+    patterns: [
+      "OPENAI",
+      "CHATGPT",
+      "CLAUDE.AI",
+      "ANTHROPIC",
+      "CURSOR USAGE",
+      "LEONARDOINT",
+      "LEONARDO.AI",
+      "DAILYOM",
+      "VEEPSCO*BE HUMAN",
+      "BE HUMAN",
+      "EB *WSTI",
+      "WSTI COMMUNITY AI",
+    ],
+    result: { category: "GENERAL_SERVICES", subcategory: "OTHER_GENERAL_SERVICES" },
+  },
+  {
+    // Menulog Pass / Uber One-style bundled-delivery subscriptions. The
+    // line item itself isn't a delivery — it's the monthly access fee.
+    patterns: ["DELIVERY UNLIMITED"],
     result: { category: "GENERAL_SERVICES", subcategory: "OTHER_GENERAL_SERVICES" },
   },
 

@@ -14,7 +14,12 @@ import {
   mapInstitutionRowFromConfig,
   mapTransactionRowFromImported,
 } from "./mappers.js";
+import { parseAccessPay } from "./parsers/accesspay.js";
 import { parseStGeorge } from "./parsers/st-george.js";
+import {
+  detectRecurring,
+  type RecurringDetectionResult,
+} from "./recurring-detector.js";
 import type {
   ImportConfig,
   ImportedRow,
@@ -62,6 +67,8 @@ export async function runImport(config: ImportConfig): Promise<ImportResult> {
     VALUES (@account_id, @item_id, @name, @official_name, @type, @subtype, @mask, @current_balance, @available_balance, @balance_limit, @currency, datetime('now'))
     ON CONFLICT(account_id) DO UPDATE SET
       name=excluded.name, official_name=excluded.official_name,
+      type=excluded.type,
+      subtype=excluded.subtype,
       current_balance=excluded.current_balance, available_balance=excluded.available_balance,
       balance_limit=excluded.balance_limit, updated_at=datetime('now')
   `);
@@ -141,6 +148,12 @@ export async function runImport(config: ImportConfig): Promise<ImportResult> {
   ).length;
   const transactionsUpdated = transactionIds.length - transactionsAdded;
 
+  // Re-run recurring detection across the whole `transactions` table now
+  // that the new rows have landed. Logged but not returned, so the public
+  // ImportResult shape stays stable.
+  const recurringResult = detectRecurring();
+  logRecurring(recurringResult);
+
   logSummary(config, accountAdded, transactionsAdded, transactionsUpdated, dateRange);
 
   return {
@@ -161,7 +174,7 @@ function pickParser(source: ImportConfig["source"]): Parser {
     case "st-george":
       return parseStGeorge;
     case "accesspay":
-      throw new Error("AccessPay parser not implemented yet");
+      return parseAccessPay;
     default: {
       // Exhaustive check — if a new ImportSource is added, this surfaces it.
       const _exhaustive: never = source;
@@ -218,6 +231,17 @@ function selectExistingTransactionIds(
     )
     .all(...ids) as { id: string }[];
   return new Set(rows.map((r) => r.id));
+}
+
+function logRecurring(result: RecurringDetectionResult): void {
+  const breakdown = Object.entries(result.byFrequency)
+    .sort((a, b) => b[1] - a[1])
+    .map(([freq, n]) => `${n} ${freq.toLowerCase()}`)
+    .join(", ");
+  const tail = breakdown ? ` (${breakdown})` : "";
+  console.log(
+    `[recurring] detected ${result.streamsDetected} streams${tail}`,
+  );
 }
 
 function logSummary(

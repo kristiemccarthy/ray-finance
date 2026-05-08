@@ -6,7 +6,12 @@
       "Bash(git commit -m ':*)",
       "Bash(git push:*)",
       "Bash(npx tsx:*)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(npm install *)",
+      "Bash(npm uninstall *)",
+      "Bash(npm ls *)",
+      "Bash(npx tsc *)",
+      "Bash(git config *)"
     ]
   }
 }
