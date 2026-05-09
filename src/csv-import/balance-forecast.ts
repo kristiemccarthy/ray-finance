@@ -20,6 +20,9 @@
 // the lowest projected point reflects the worst intra-day intermediate state.
 // ---------------------------------------------------------------------------
 
+import { readFileSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
 import { getDb } from "../db/connection.js";
 import { predictNextBillDate } from "../db/bills.js";
 
@@ -55,14 +58,56 @@ export interface CycleProjection {
   totalBills: number;
   startingBalance: number;
   endingBalance: number;
+  /** Bill-only ending less compounded life adjustments — the realistic figure. */
+  lifeAdjustedStartingBalance: number;
+  lifeAdjustedEndingBalance: number;
+  /** The amount subtracted at end-of-cycle: budgets/2.17 + buffer. */
+  cycleAdjustment: number;
 }
 
 export interface ForecastResult {
   accountId: string;
   currentBalance: number;
   cycles: CycleProjection[];
-  /** Worst projected balance across all cycles, including intra-cycle dips. */
+  /** Worst life-adjusted balance across all cycles, including intra-cycle dips. */
   lowestPoint: { date: string; balance: number; reason: string };
+  /** Per-cycle amount being subtracted for living costs (for display). */
+  cycleAdjustment: number;
+}
+
+export interface ForecastSettings {
+  perCycleBuffer: number;
+  applyBudgets: boolean;
+}
+
+const DEFAULT_SETTINGS: ForecastSettings = {
+  perCycleBuffer: 200,
+  applyBudgets: true,
+};
+
+/**
+ * Load forecast settings from `~/.ray/forecast.json`. Missing file or invalid
+ * JSON falls back to defaults silently — settings are an optional overlay,
+ * not a hard requirement.
+ */
+export function loadForecastSettings(): ForecastSettings {
+  try {
+    const path = join(homedir(), ".ray", "forecast.json");
+    const raw = readFileSync(path, "utf8");
+    const parsed = JSON.parse(raw) as Partial<ForecastSettings>;
+    return {
+      perCycleBuffer:
+        typeof parsed.perCycleBuffer === "number"
+          ? parsed.perCycleBuffer
+          : DEFAULT_SETTINGS.perCycleBuffer,
+      applyBudgets:
+        typeof parsed.applyBudgets === "boolean"
+          ? parsed.applyBudgets
+          : DEFAULT_SETTINGS.applyBudgets,
+    };
+  } catch {
+    return DEFAULT_SETTINGS;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +155,14 @@ export function forecastBalance(options: ForecastOptions): ForecastResult {
     numberOfCycles,
   );
 
+  // Life-adjustment: subtract typical monthly budgets (scaled to per-cycle)
+  // plus a flat buffer for unexpected costs. Both come from settings/db,
+  // both default sensibly when missing.
+  const settings = loadForecastSettings();
+  const totalMonthlyBudgets = settings.applyBudgets ? readTotalMonthlyBudgets(db) : 0;
+  // 2.17 cycles per month: average month = 30.44 days / 14-day cycle.
+  const cycleAdjustment = totalMonthlyBudgets / 2.17 + settings.perCycleBuffer;
+
   if (boundaries.length === 0) {
     return {
       accountId,
@@ -120,6 +173,7 @@ export function forecastBalance(options: ForecastOptions): ForecastResult {
         balance: currentBalance,
         reason: "starting balance",
       },
+      cycleAdjustment,
     };
   }
 
@@ -164,17 +218,23 @@ export function forecastBalance(options: ForecastOptions): ForecastResult {
     ...projectManualBills(manualRows, windowStart, windowEnd),
   ];
 
-  // 5. Walk the events chronologically per cycle, tracking running balance
-  //    and the lowest point seen so far.
+  // 5. Walk the events chronologically per cycle, tracking both the bill-only
+  //    running balance (existing behaviour) and a life-adjusted running balance
+  //    (bill events plus an end-of-cycle deduction for typical living costs).
+  //    Cycle 1 starts both balances at currentBalance; subsequent cycles
+  //    inherit the life-adjusted ending of the previous cycle, so adjustments
+  //    compound across the forecast.
   let runningBalance = currentBalance;
+  let lifeRunning = currentBalance;
   let lowestPoint = {
     date: boundaries[0].startDate,
     balance: currentBalance,
     reason: "starting balance",
   };
 
-  const cycles: CycleProjection[] = boundaries.map((boundary) => {
+  const cycles: CycleProjection[] = boundaries.map((boundary, cycleIndex) => {
     const startingBalance = runningBalance;
+    const lifeAdjustedStartingBalance = lifeRunning;
 
     const incoming = allIncome
       .filter((it) => it.date >= boundary.startDate && it.date <= boundary.endDate)
@@ -195,18 +255,50 @@ export function forecastBalance(options: ForecastOptions): ForecastResult {
       return a.sign - b.sign;
     });
 
+    // Pre-scan so attribution can prefer the cycle's biggest bill over a
+    // routine $9.99 charge that happens to push the balance to a new low.
+    const largestBillInCycle = outgoing.reduce(
+      (max, b) => Math.max(max, b.amount),
+      0,
+    );
+    // 30% of the cycle's living-cost adjustment is "noticeable" — anything
+    // smaller is treated as routine. The largest-bill clause keeps the rule
+    // useful in cycles with no large bill at all.
+    const significantBillThreshold = 0.3 * cycleAdjustment;
+
     for (const ev of events) {
       runningBalance += ev.sign * ev.amount;
-      // Only bills can reduce the balance, so only bills can establish a
-      // new low. Recording the bill that triggered it gives us the "reason"
-      // the spec asks for.
-      if (ev.sign === -1 && runningBalance < lowestPoint.balance) {
-        lowestPoint = {
-          date: ev.date,
-          balance: runningBalance,
-          reason: `after ${ev.description} (-${formatMoney(ev.amount)})`,
-        };
+      lifeRunning += ev.sign * ev.amount;
+      // Only bills can establish a new low. Track against the life-adjusted
+      // running balance so the lowest-point reflects the realistic picture.
+      if (ev.sign === -1 && lifeRunning < lowestPoint.balance) {
+        const isSignificant =
+          ev.amount >= significantBillThreshold ||
+          ev.amount >= largestBillInCycle;
+        if (isSignificant) {
+          lowestPoint = {
+            date: ev.date,
+            balance: lifeRunning,
+            reason: `after ${ev.description} (-${formatMoney(ev.amount)})`,
+          };
+        } else {
+          // Trivial charge tipped the balance lower, but the real cause is
+          // upstream (a big bill earlier this cycle, or compounding living
+          // costs). Record the new low but keep the existing attribution.
+          lowestPoint = { ...lowestPoint, balance: lifeRunning };
+        }
       }
+    }
+
+    // Apply this cycle's life adjustment at end-of-cycle. If this drops below
+    // the recorded low, attribute it to the cycle itself.
+    lifeRunning -= cycleAdjustment;
+    if (cycleAdjustment > 0 && lifeRunning < lowestPoint.balance) {
+      lowestPoint = {
+        date: boundary.endDate,
+        balance: lifeRunning,
+        reason: `after cycle ${cycleIndex + 1} living costs (-${formatMoney(cycleAdjustment)})`,
+      };
     }
 
     return {
@@ -218,10 +310,21 @@ export function forecastBalance(options: ForecastOptions): ForecastResult {
       totalBills: outgoing.reduce((s, o) => s + o.amount, 0),
       startingBalance,
       endingBalance: runningBalance,
+      lifeAdjustedStartingBalance,
+      lifeAdjustedEndingBalance: lifeRunning,
+      cycleAdjustment,
     };
   });
 
-  return { accountId, currentBalance, cycles, lowestPoint };
+  return { accountId, currentBalance, cycles, lowestPoint, cycleAdjustment };
+}
+
+/** Sum of all `monthly_limit` rows in `budgets`. Returns 0 if the table is empty. */
+function readTotalMonthlyBudgets(db: ReturnType<typeof getDb>): number {
+  const row = db
+    .prepare(`SELECT COALESCE(SUM(monthly_limit), 0) AS total FROM budgets`)
+    .get() as { total: number };
+  return row.total;
 }
 
 // ---------------------------------------------------------------------------
