@@ -21,19 +21,26 @@ const moneyFormatterCents = new Intl.NumberFormat("en-AU", {
   maximumFractionDigits: 2,
 });
 
+// Lock the timezone explicitly: server SSR (often UTC) and client hydration
+// (Sydney) would otherwise format the same Date differently. The render path
+// here doesn't call `new Date()`, but the formatters can still diverge if the
+// host timezone differs between SSR and hydration.
 const dateFormatter = new Intl.DateTimeFormat("en-AU", {
   weekday: "short",
   day: "numeric",
   month: "short",
+  timeZone: "Australia/Sydney",
 });
 
 const dayMonthFormatter = new Intl.DateTimeFormat("en-AU", {
   day: "numeric",
   month: "short",
+  timeZone: "Australia/Sydney",
 });
 
 const dayFormatter = new Intl.DateTimeFormat("en-AU", {
   day: "numeric",
+  timeZone: "Australia/Sydney",
 });
 
 function parseYMD(s: string): Date {

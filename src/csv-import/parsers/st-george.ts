@@ -51,6 +51,18 @@ const DESCRIPTION_ALIASES: Record<string, string> = {
   // Map the new descriptor to the old one so the recurring detector
   // recognises them as one continuous stream.
   "uniting transact payroll": "Uniting (Nsw.Act 032425000000000000",
+
+  // Merchant display cleanups. Bank descriptors are noisy ("Visa Purchase
+  // 26Apr Amznprimeau Membersh Sydney So") — collapse to the readable
+  // brand name so the upcoming-bills and forecast views are scannable.
+  "amznprime": "Amazon Prime",
+  "disneyplus": "Disney+",
+  "youi": "Youi Insurance",
+  "openai *chatgpt": "ChatGPT",
+  "leonardoint": "Leonardo.ai",
+  "audible": "Audible",
+  "ezi*occom": "Occom Internet",
+  "pet insurance chatswood": "Pet Insurance",
 };
 
 // ---------------------------------------------------------------------------
@@ -97,15 +109,17 @@ export const parseStGeorge: Parser = {
       const record = records[i];
 
       const date = parseDate(record.Date ?? "", lineNumber);
-      const description = applyAliases(
-        normaliseDescription(record.Description ?? ""),
-      );
+      // Two-step: keep the post-normalisation, pre-alias string as
+      // raw_description (stable identity for transaction_id), then apply
+      // aliases to produce the display description shown to the user.
+      const raw_description = normaliseDescription(record.Description ?? "");
+      const description = applyAliases(raw_description);
       const debit = parseAmountField(record.Debit ?? "", "Debit", lineNumber);
       const credit = parseAmountField(record.Credit ?? "", "Credit", lineNumber);
       const amount = composeAmount(debit, credit, lineNumber);
       const balance = parseBalance(record.Balance ?? "");
 
-      rows.push({ date, description, amount, balance });
+      rows.push({ date, description, raw_description, amount, balance });
     }
 
     return rows;

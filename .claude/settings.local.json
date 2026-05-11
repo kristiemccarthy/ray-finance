@@ -11,7 +11,21 @@
       "Bash(npm uninstall *)",
       "Bash(npm ls *)",
       "Bash(npx tsc *)",
-      "Bash(git config *)"
+      "Bash(git config *)",
+      "Bash(npm run *)",
+      "Bash(tee ../dev-server.log)",
+      "Bash(curl -s http://localhost:3000 -o ssr-bills.html)",
+      "Bash(curl -s http://localhost:3000/forecast -o ssr-forecast.html)",
+      "Bash(curl -s http://localhost:3000/balances -o ssr-balances.html)",
+      "Bash(grep -o 'A\\\\?\\\\$[0-9][0-9,]*\\\\\\(\\\\.[0-9]*\\\\\\)\\\\?' ssr-bills.html)",
+      "Bash(grep -o 'A\\\\?\\\\$[0-9][0-9,]*\\\\\\(\\\\.[0-9]*\\\\\\)\\\\?' ssr-balances.html)",
+      "Bash(grep -o '[A-Z][a-z]\\\\{2\\\\} [0-9]\\\\{1,2\\\\} [A-Z][a-z]\\\\{2\\\\}' ssr-bills.html)",
+      "Bash(grep -oE '\\(Mon|Tue|Wed|Thu|Fri|Sat|Sun\\) [0-9]{1,2} [A-Z][a-z]{2}' ssr-bills.html)",
+      "Bash(grep -oE '\\(Mon|Tue|Wed|Thu|Fri|Sat|Sun\\) [0-9]{1,2} [A-Z][a-z]{2}' ssr-forecast.html)",
+      "Bash(grep -oE '<main[^>]*>.{0,3000}' ssr-bills.html)",
+      "Bash(grep -oE '<span>\\(Mon|Tue|Wed|Thu|Fri|Sat|Sun\\), [0-9]{1,2} [A-Z][a-z]{2}</span>' ssr-bills.html)",
+      "Bash(grep -oE '\\(Mon|Tue|Wed|Thu|Fri|Sat|Sun\\), [0-9]{1,2} [A-Z][a-z]{2}' ssr-forecast.html)",
+      "Bash(grep -v \"^$\")"
     ]
   }
 }

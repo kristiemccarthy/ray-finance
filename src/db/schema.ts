@@ -32,6 +32,7 @@ export function migrate(db: Database.Database): void {
       amount REAL NOT NULL,
       date TEXT NOT NULL,
       name TEXT NOT NULL,
+      raw_name TEXT,
       merchant_name TEXT,
       category TEXT,
       subcategory TEXT,
@@ -275,6 +276,17 @@ export function migrate(db: Database.Database): void {
     db.exec(`ALTER TABLE recurring_bills ADD COLUMN frequency TEXT NOT NULL DEFAULT 'monthly'`);
     db.exec(`ALTER TABLE recurring_bills ADD COLUMN next_due_date TEXT`);
   }
+
+  // Migrate: add raw_name to transactions so the canonical (post-alias)
+  // `name` and the original bank descriptor stay decoupled. transaction_id
+  // will derive from raw_name in a follow-up change, so alias edits no
+  // longer rehash the row and orphan it. Backfill existing rows from
+  // `name` since that's the only signal we have for pre-migration data.
+  const txCols = db.prepare(`PRAGMA table_info(transactions)`).all() as { name: string }[];
+  if (!txCols.some(c => c.name === "raw_name")) {
+    db.exec(`ALTER TABLE transactions ADD COLUMN raw_name TEXT`);
+  }
+  db.exec(`UPDATE transactions SET raw_name = name WHERE raw_name IS NULL`);
 
   // Migrate: rebuild recurring table to use Plaid stream schema
   const recCols = db.prepare(`PRAGMA table_info(recurring)`).all() as { name: string }[];

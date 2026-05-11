@@ -21,8 +21,20 @@
 export interface ImportedRow {
   /** Transaction date in ISO `YYYY-MM-DD` format. */
   date: string;
-  /** Raw description as it appeared in the source file. */
+  /**
+   * Display description — the parser's `description` after whitespace
+   * normalisation **and** the alias rewrite. This is what's shown in the UI
+   * and what feeds the recurring-stream detector. Two raw descriptors that
+   * map to the same alias collapse to the same `description`.
+   */
   description: string;
+  /**
+   * Original bank descriptor after whitespace normalisation only — **before**
+   * the alias rewrite. Hashed into `transaction_id` so alias edits don't
+   * change a row's identity. Always populated by parsers; if a parser
+   * applies no aliases this will equal `description`.
+   */
+  raw_description: string;
   /**
    * Amount in Plaid convention: positive = out, negative = in.
    * Parsers must convert from their source's convention before populating.

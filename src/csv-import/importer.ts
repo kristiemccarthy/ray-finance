@@ -109,10 +109,11 @@ export async function runImport(config: ImportConfig): Promise<ImportResult> {
   const existingTransactionIds = selectExistingTransactionIds(db, transactionIds);
 
   const upsertTransaction = db.prepare(`
-    INSERT INTO transactions (transaction_id, account_id, amount, date, name, merchant_name, category, subcategory, pending, iso_currency_code, payment_channel, logo_url, website)
-    VALUES (@transaction_id, @account_id, @amount, @date, @name, @merchant_name, @category, @subcategory, @pending, @iso_currency_code, @payment_channel, @logo_url, @website)
+    INSERT INTO transactions (transaction_id, account_id, amount, date, name, raw_name, merchant_name, category, subcategory, pending, iso_currency_code, payment_channel, logo_url, website)
+    VALUES (@transaction_id, @account_id, @amount, @date, @name, @raw_name, @merchant_name, @category, @subcategory, @pending, @iso_currency_code, @payment_channel, @logo_url, @website)
     ON CONFLICT(transaction_id) DO UPDATE SET
       amount=excluded.amount, date=excluded.date, name=excluded.name,
+      raw_name=excluded.raw_name,
       merchant_name=excluded.merchant_name, category=excluded.category,
       subcategory=excluded.subcategory, pending=excluded.pending,
       payment_channel=excluded.payment_channel, logo_url=excluded.logo_url,

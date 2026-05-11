@@ -4,10 +4,14 @@ import { getUpcomingBills, type UpcomingBill } from "@ray/db/bills";
 
 export const dynamic = "force-dynamic";
 
+// Lock the timezone explicitly: server SSR (often UTC) and client hydration
+// (Sydney) would otherwise format the same Date differently, which is itself
+// a hydration-mismatch source independent of `new Date()`.
 const dateFormatter = new Intl.DateTimeFormat("en-AU", {
   weekday: "short",
   day: "numeric",
   month: "short",
+  timeZone: "Australia/Sydney",
 });
 
 const moneyFormatter = new Intl.NumberFormat("en-AU", {
@@ -16,11 +20,14 @@ const moneyFormatter = new Intl.NumberFormat("en-AU", {
   maximumFractionDigits: 2,
 });
 
-function daysUntil(date: Date): number {
-  const today = new Date();
-  const a = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
-  const b = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
-  return Math.round((b - a) / 86_400_000);
+/** UTC midnight of the given instant. Pure — never reads the clock. */
+function startOfUtcDay(d: Date): Date {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+/** Whole days between two UTC-midnight Dates. Pure — `today` is supplied by the caller. */
+function daysUntil(date: Date, today: Date): number {
+  return Math.round((date.getTime() - today.getTime()) / 86_400_000);
 }
 
 function urgencyClass(days: number): string {
@@ -33,6 +40,9 @@ export default function Home() {
   const db = getDb();
   const bills = getUpcomingBills(db, 14);
   const total = bills.reduce((sum, b) => sum + b.amount, 0);
+  // Compute "today" once per request, then thread it down. Calling `new Date()`
+  // anywhere below this point would risk server/client divergence.
+  const today = startOfUtcDay(new Date());
 
   return (
     <main className="min-h-screen bg-stone-50 text-neutral-800">
@@ -61,6 +71,7 @@ export default function Home() {
                 key={i}
                 bill={bill}
                 isLast={i === bills.length - 1}
+                today={today}
               />
             ))}
           </ul>
@@ -70,8 +81,16 @@ export default function Home() {
   );
 }
 
-function BillRow({ bill, isLast }: { bill: UpcomingBill; isLast: boolean }) {
-  const days = daysUntil(bill.date);
+function BillRow({
+  bill,
+  isLast,
+  today,
+}: {
+  bill: UpcomingBill;
+  isLast: boolean;
+  today: Date;
+}) {
+  const days = daysUntil(bill.date, today);
   const sourceLabel =
     bill.source === "recurring"
       ? "[recurring]"

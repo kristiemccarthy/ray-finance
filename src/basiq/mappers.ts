@@ -75,7 +75,19 @@ export interface TransactionRow {
   account_id: string;
   amount: number;
   date: string;
+  /**
+   * Display description — the value shown in the UI. For CSV imports this
+   * is the post-alias name; for sources that don't apply aliases (Basiq,
+   * Plaid) it matches `raw_name`.
+   */
   name: string;
+  /**
+   * Original bank descriptor before any alias rewrite. Decouples row
+   * identity (hashed in part from `raw_name`/balance) from display
+   * (`name`) so alias edits don't orphan rows. For sources without
+   * aliasing this can mirror `name`; `null` is also acceptable.
+   */
+  raw_name: string | null;
   merchant_name: string | null;
   category: string | null;
   subcategory: string | null;
@@ -232,6 +244,9 @@ export function mapTransactionRow(transaction: BasiqTransaction): TransactionRow
     amount: rayAmount,
     date: toDateOnly(transaction.postDate),
     name: transaction.description,
+    // Basiq doesn't apply alias rewrites — the description is already the
+    // bank's own descriptor — so raw and display are the same string.
+    raw_name: transaction.description,
     merchant_name: transaction.enrich?.merchant?.businessName ?? null,
     category,
     subcategory: mapped.subcategory,

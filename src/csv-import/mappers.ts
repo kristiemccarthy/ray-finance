@@ -40,8 +40,31 @@ export function deriveAccountId(config: ImportConfig): string {
 
 /**
  * Build a stable transaction identifier from the row's content. We hash
- * `accountId|date|amount|description` so re-imports of the same file
- * produce the same IDs and `ON CONFLICT DO UPDATE` handles deduplication.
+ * `accountId|date|amount|balance` so a row's identity is fixed by the
+ * bank's own statement: the same row from the same statement always
+ * hashes the same way, regardless of how its description is later
+ * rewritten.
+ *
+ * Choice of `balance` over `description`: aliases mutate `description`
+ * over time (a merchant rename in the alias map rewrites every prior
+ * row's display name), which previously caused alias edits to orphan
+ * every affected row — the new ID didn't match the old one and `ON
+ * CONFLICT DO UPDATE` saw a new insert instead of an update. `balance`
+ * is the bank's post-transaction running balance: stable per row across
+ * re-imports, never touched by Ray.
+ *
+ * Known limitations:
+ *  - **Null balance.** Some sources may omit the running balance. The
+ *    `NULL` fallback in `balanceForHash` collapses two same-day,
+ *    same-amount rows with no balance into a single ID. Both currently
+ *    supported parsers (St George CSV, AccessPay PDF) always populate
+ *    `balance`, so this is a theoretical risk only — flagged for the
+ *    next source that might not.
+ *  - **Retroactive balance correction.** If the bank reissues a
+ *    statement with the running balance recomputed (e.g. after a
+ *    back-dated chargeback), every subsequent row's hash changes and
+ *    re-importing that CSV creates a duplicate set of rows. Rare in
+ *    practice and accepted as the trade-off for alias-edit safety.
  *
  * Truncation to 32 hex chars (~128 bits) is plenty of entropy for a
  * single user's transaction history.
@@ -50,8 +73,19 @@ export function deriveTransactionId(
   accountId: string,
   row: ImportedRow,
 ): string {
-  const input = `${accountId}|${row.date}|${row.amount.toFixed(2)}|${row.description}`;
+  const input = `${accountId}|${row.date}|${row.amount.toFixed(2)}|${balanceForHash(row.balance)}`;
   return createHash("sha256").update(input).digest("hex").slice(0, 32);
+}
+
+/**
+ * Format `balance` for inclusion in the transaction-id hash. `null` is
+ * encoded as the literal `"NULL"` so the hash input remains a stable
+ * string. See the collision note on `deriveTransactionId` — this is the
+ * source of the null-balance limitation called out there.
+ */
+function balanceForHash(balance: number | null): string {
+  if (balance === null) return "NULL";
+  return balance.toFixed(2);
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +183,9 @@ export function mapTransactionRowFromImported(
     amount: row.amount,
     date: row.date,
     name: row.description,
+    // Persist the pre-alias descriptor so we can re-derive the display
+    // name from a future alias map without touching transaction identity.
+    raw_name: row.raw_description,
     merchant_name: null,
     category,
     subcategory: matched.subcategory,

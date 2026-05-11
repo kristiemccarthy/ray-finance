@@ -264,8 +264,12 @@ const STALE_MULTIPLIERS: Record<string, number> = {
  * never re-upserted, so it stays `is_active = 0` permanently.
  */
 const STREAM_EXCLUSIONS: readonly string[] = [
-  "PET INSURANCE CHATSWOOD",
-  "AUDIBLE LIMITED AU MELBOURNE",
+  // Patterns are matched case-insensitively (uppercased) against the
+  // normalised stream key. The aliases applied at parse time mean the
+  // descriptions are now short brand names rather than verbose bank
+  // descriptors — keep these patterns short to match accordingly.
+  "PET INSURANCE",
+  "AUDIBLE",
   "FARMERS LAND ROUSE H",
   "PYPL PAYIN4",
 ];

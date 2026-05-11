@@ -73,6 +73,24 @@ const TRANSACTION_LINE = /^(\d{1,2}\/\d{1,2}\/\d{4})(.+?)(-?\$[\d,]+\.\d{2})(-?\
 /** Trailing `(DTXN)` marker on card-purchase descriptions. */
 const DTXN_SUFFIX = /\s*\(DTXN\)\s*$/;
 
+/**
+ * Merchant display cleanups. Same mechanism and intent as the St George
+ * parser's aliases: lookup is case-insensitive substring match against the
+ * raw description, replacement overwrites the entire descriptor. Some of
+ * these merchants charge through both St George and AccessPay (Amazon
+ * Prime, Audible) so the canonical name needs to match across parsers.
+ */
+const DESCRIPTION_ALIASES: Record<string, string> = {
+  "amznprime": "Amazon Prime",
+  "disneyplus": "Disney+",
+  "youi": "Youi Insurance",
+  "openai *chatgpt": "ChatGPT",
+  "leonardoint": "Leonardo.ai",
+  "audible": "Audible",
+  "ezi*occom": "Occom Internet",
+  "pet insurance chatswood": "Pet Insurance",
+};
+
 // ---------------------------------------------------------------------------
 // Parser implementation
 // ---------------------------------------------------------------------------
@@ -116,9 +134,13 @@ export const parseAccessPay: Parser = {
 
       const balance = parseMoney(balanceField);
 
-      const description = stripDtxn(normaliseDescription(descField));
+      // Two-step: keep the cleaned-up (whitespace + DTXN suffix stripped)
+      // string as raw_description for stable transaction_id; the alias
+      // rewrite only affects the display description.
+      const raw_description = stripDtxn(normaliseDescription(descField));
+      const description = applyAliases(raw_description);
 
-      rows.push({ date, description, amount, balance });
+      rows.push({ date, description, raw_description, amount, balance });
     }
 
     return rows;
@@ -159,4 +181,21 @@ function normaliseDescription(field: string): string {
 
 function stripDtxn(description: string): string {
   return description.replace(DTXN_SUFFIX, "").trim();
+}
+
+/**
+ * Rewrite descriptions that match a known alias substring (case-insensitive)
+ * to a canonical descriptor. Same shape as the St George parser's helper:
+ * the full original is replaced by the alias value, so two raw descriptors
+ * for the same merchant collapse into one stable display name. Returns the
+ * input unchanged if no alias matches.
+ */
+function applyAliases(description: string): string {
+  const lower = description.toLowerCase();
+  for (const [needle, replacement] of Object.entries(DESCRIPTION_ALIASES)) {
+    if (lower.includes(needle)) {
+      return replacement;
+    }
+  }
+  return description;
 }
