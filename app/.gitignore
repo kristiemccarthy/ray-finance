@@ -3,3 +3,6 @@ node_modules/
 out/
 *.tsbuildinfo
 .env*.local
+
+# Runtime log from start-ray.bat — appended on every server launch.
+ray-server.log
