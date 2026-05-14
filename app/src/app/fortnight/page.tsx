@@ -1,0 +1,352 @@
+import { getDb } from "@ray/db/connection";
+
+export const dynamic = "force-dynamic";
+
+const MS_PER_DAY = 86_400_000;
+const ANCHOR_DOW = 3; // Wednesday — salary lands fortnightly on this day.
+const CYCLE_LENGTH_DAYS = 14;
+// 30.44 days / 14 = 2.174 cycles per average month. Matches balance-forecast.
+const CYCLES_PER_MONTH = 2.17;
+
+const moneyFormatter = new Intl.NumberFormat("en-AU", {
+  style: "currency",
+  currency: "AUD",
+  maximumFractionDigits: 0,
+});
+
+const moneyFormatterCents = new Intl.NumberFormat("en-AU", {
+  style: "currency",
+  currency: "AUD",
+  maximumFractionDigits: 2,
+});
+
+interface BudgetRow {
+  category: string;
+  monthly_limit: number;
+}
+
+interface CategoryRow {
+  category: string;
+  total: number;
+}
+
+interface Cycle {
+  startDate: string;
+  endDate: string;
+  dayOfCycle: number;
+  fractionElapsed: number;
+}
+
+interface CategoryStatus {
+  category: string;
+  label: string;
+  spent: number;
+  fortnightTarget: number;
+  expectedByNow: number;
+  variance: number;
+  status: "blue" | "green" | "amber" | "red";
+}
+
+function startOfUtcDay(d: Date): Date {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+function toYMD(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+function parseYMD(s: string): Date {
+  return new Date(s + "T00:00:00Z");
+}
+
+/**
+ * Anchor the current cycle to the most recent actual salary deposit so the
+ * 14-day window lines up with the fortnightly pay rhythm rather than just
+ * "the most recent Wednesday" (which could land mid-cycle for fortnightly
+ * pay). Falls back to dow-3 arithmetic if no inflow stream is on file.
+ */
+function computeCurrentCycle(today: Date): Cycle {
+  const db = getDb();
+  // Filter to fortnightly inflows and pick the largest by avg_amount — salary
+  // dwarfs other repeat inflows (personal payments, card top-ups). Ordering by
+  // `last_date` would pick whichever fortnightly inflow happened to land most
+  // recently, which is often not the actual paycheck.
+  const salaryRow = db
+    .prepare(
+      `SELECT last_date
+         FROM recurring
+        WHERE is_active = 1
+          AND stream_type = 'inflow'
+          AND last_date IS NOT NULL
+          AND frequency = 'BIWEEKLY'
+        ORDER BY avg_amount DESC
+        LIMIT 1`,
+    )
+    .get() as { last_date: string } | undefined;
+
+  let cycleStart: Date;
+  if (salaryRow?.last_date) {
+    let d = parseYMD(salaryRow.last_date);
+    // Walk forward in 14-day steps to the most recent anchor <= today.
+    while (d.getTime() + CYCLE_LENGTH_DAYS * MS_PER_DAY <= today.getTime()) {
+      d = new Date(d.getTime() + CYCLE_LENGTH_DAYS * MS_PER_DAY);
+    }
+    cycleStart = d;
+  } else {
+    const todayDow = today.getUTCDay();
+    const daysBack = (todayDow - ANCHOR_DOW + 7) % 7;
+    cycleStart = new Date(today.getTime() - daysBack * MS_PER_DAY);
+  }
+
+  const cycleEnd = new Date(
+    cycleStart.getTime() + (CYCLE_LENGTH_DAYS - 1) * MS_PER_DAY,
+  );
+  const dayOfCycle =
+    Math.floor((today.getTime() - cycleStart.getTime()) / MS_PER_DAY) + 1;
+  const fractionElapsed = Math.min(
+    1,
+    Math.max(0, dayOfCycle / CYCLE_LENGTH_DAYS),
+  );
+
+  return {
+    startDate: toYMD(cycleStart),
+    endDate: toYMD(cycleEnd),
+    dayOfCycle,
+    fractionElapsed,
+  };
+}
+
+function humaniseCategory(category: string): string {
+  const overrides: Record<string, string> = {
+    FOOD_AND_DRINK: "Food & Drink",
+    GENERAL_MERCHANDISE: "Shopping",
+    GENERAL_SERVICES: "Services",
+    RENT_AND_UTILITIES: "Rent & Utilities",
+    BANK_FEES: "Bank Fees",
+  };
+  if (overrides[category]) return overrides[category];
+  return category
+    .split("_")
+    .map((w) => w.charAt(0) + w.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function statusFromRatio(
+  spent: number,
+  expected: number,
+): CategoryStatus["status"] {
+  // If nothing's expected yet (very start of cycle), treat any spend > 0 as
+  // ahead of pace. Avoids divide-by-zero and a misleading "blue" reading.
+  if (expected <= 0) return spent > 0 ? "amber" : "blue";
+  const ratio = spent / expected;
+  if (ratio < 0.9) return "blue";
+  if (ratio <= 1.1) return "green";
+  if (ratio <= 1.25) return "amber";
+  return "red";
+}
+
+const STATUS_STRIPE: Record<CategoryStatus["status"], string> = {
+  blue: "bg-blue-400",
+  green: "bg-emerald-500",
+  amber: "bg-amber-500",
+  red: "bg-red-500",
+};
+
+const STATUS_TEXT: Record<CategoryStatus["status"], string> = {
+  blue: "text-blue-600",
+  green: "text-emerald-600",
+  amber: "text-amber-600",
+  red: "text-red-600",
+};
+
+function loadCategoryStatuses(
+  cycle: Cycle,
+): { categories: CategoryStatus[]; other: number } {
+  const db = getDb();
+  const budgets = db
+    .prepare(`SELECT category, monthly_limit FROM budgets ORDER BY monthly_limit DESC`)
+    .all() as BudgetRow[];
+
+  const totals = db
+    .prepare(
+      `SELECT category, COALESCE(SUM(amount), 0) AS total
+         FROM transactions
+        WHERE date BETWEEN ? AND ?
+          AND amount > 0
+          AND pending = 0
+        GROUP BY category`,
+    )
+    .all(cycle.startDate, cycle.endDate) as CategoryRow[];
+
+  const totalsByCategory = new Map<string, number>();
+  for (const row of totals) {
+    totalsByCategory.set(row.category, row.total);
+  }
+
+  const categories: CategoryStatus[] = budgets.map((b) => {
+    const spent = totalsByCategory.get(b.category) ?? 0;
+    const fortnightTarget = b.monthly_limit / CYCLES_PER_MONTH;
+    const expectedByNow = cycle.fractionElapsed * fortnightTarget;
+    const variance = spent - expectedByNow;
+    return {
+      category: b.category,
+      label: humaniseCategory(b.category),
+      spent,
+      fortnightTarget,
+      expectedByNow,
+      variance,
+      status: statusFromRatio(spent, expectedByNow),
+    };
+  });
+
+  // "Other" = everything else that's a real outgoing spend in the cycle. Skip
+  // transfers (between own accounts) and INCOME (sign quirks); everything
+  // else is fair game and matches the footer caveat about including bills.
+  const budgetCategorySet = new Set(budgets.map((b) => b.category));
+  const allOutflows = db
+    .prepare(
+      `SELECT COALESCE(SUM(amount), 0) AS total
+         FROM transactions
+        WHERE date BETWEEN ? AND ?
+          AND amount > 0
+          AND pending = 0
+          AND category NOT IN ('TRANSFER_IN', 'TRANSFER_OUT', 'INCOME', 'LOAN_PAYMENTS')`,
+    )
+    .get(cycle.startDate, cycle.endDate) as { total: number };
+
+  const categorisedTotal = categories.reduce((s, c) => s + c.spent, 0);
+  const other = Math.max(0, allOutflows.total - categorisedTotal);
+
+  return { categories, other };
+}
+
+/**
+ * Format a variance for the "X over/under pace" lines. Over-pace amounts get
+ * an explicit "+" to signal direction; under-pace amounts drop the minus and
+ * render as a plain dollar figure — the trailing "under pace" already conveys
+ * the sign, and the bare minus reads as a typographical wart.
+ */
+function paceMoney(variance: number): string {
+  if (variance < 0) return moneyFormatter.format(Math.abs(variance));
+  return `+${moneyFormatter.format(variance)}`;
+}
+
+/**
+ * Sum of cycle outflows whose display name matches an active recurring
+ * outflow stream. Approximation — Plaid clusters set `recurring.merchant_name`
+ * to the post-alias display name, which is also what `transactions.name`
+ * carries after our own alias pass. A transaction that's not in a recurring
+ * stream (one-off groceries, ad-hoc purchases) is excluded.
+ */
+function loadBillsPaid(cycle: Cycle): number {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT COALESCE(SUM(t.amount), 0) AS total
+         FROM transactions t
+        WHERE t.date BETWEEN ? AND ?
+          AND t.amount > 0
+          AND t.pending = 0
+          AND t.name IN (
+            SELECT merchant_name FROM recurring
+             WHERE is_active = 1
+               AND stream_type = 'outflow'
+               AND merchant_name IS NOT NULL
+          )`,
+    )
+    .get(cycle.startDate, cycle.endDate) as { total: number };
+  return row.total;
+}
+
+export default function FortnightPage() {
+  const today = startOfUtcDay(new Date());
+  const cycle = computeCurrentCycle(today);
+  const { categories, other } = loadCategoryStatuses(cycle);
+  const billsPaid = loadBillsPaid(cycle);
+
+  const totalSpent = categories.reduce((s, c) => s + c.spent, 0);
+  const totalFortnightTarget = categories.reduce(
+    (s, c) => s + c.fortnightTarget,
+    0,
+  );
+  const totalExpected = cycle.fractionElapsed * totalFortnightTarget;
+  const totalVariance = totalSpent - totalExpected;
+  const totalStatus = statusFromRatio(totalSpent, totalExpected);
+
+  return (
+    <main className="text-neutral-800">
+      <div className="mx-auto max-w-2xl px-6 py-16">
+        <h1 className="mb-12 text-center text-sm font-medium tracking-wide text-neutral-500 uppercase">
+          This Fortnight
+        </h1>
+
+        <section className="mb-14 text-center">
+          <div className="text-sm text-neutral-500">
+            Day {cycle.dayOfCycle} of {CYCLE_LENGTH_DAYS}
+          </div>
+          <div className="mt-2 text-3xl font-semibold tabular-nums text-neutral-900">
+            {moneyFormatterCents.format(totalSpent)}
+          </div>
+          <div className="mt-1 text-sm text-neutral-500">
+            of {moneyFormatter.format(totalExpected)} expected by now
+          </div>
+          <div className={`mt-3 text-sm font-medium ${STATUS_TEXT[totalStatus]}`}>
+            {paceMoney(totalVariance)}{" "}
+            {totalVariance >= 0 ? "ahead of" : "behind"} expected pace
+          </div>
+        </section>
+
+        <ul className="space-y-3">
+          {categories.map((c) => (
+            <CategoryCard key={c.category} cat={c} cycle={cycle} />
+          ))}
+        </ul>
+
+        <p className="mt-8 text-center text-xs text-neutral-500">
+          Bills paid this cycle:{" "}
+          <span className="tabular-nums">
+            {moneyFormatterCents.format(billsPaid)}
+          </span>
+        </p>
+
+        {other > 0 && (
+          <p className="mt-2 text-center text-xs text-neutral-500">
+            Other spending this cycle:{" "}
+            <span className="tabular-nums">
+              {moneyFormatterCents.format(other)}
+            </span>
+          </p>
+        )}
+
+        <p className="mt-16 text-center text-xs leading-relaxed text-neutral-400">
+          Includes all spending in your accounts — bills and discretionary.
+          Compare to per-category fortnightly budget pace.
+        </p>
+      </div>
+    </main>
+  );
+}
+
+function CategoryCard({ cat, cycle }: { cat: CategoryStatus; cycle: Cycle }) {
+  const overUnder = cat.variance >= 0 ? "over pace" : "under pace";
+  return (
+    <li className="flex overflow-hidden rounded-md border border-stone-200 bg-white">
+      <span aria-hidden className={`w-1 shrink-0 ${STATUS_STRIPE[cat.status]}`} />
+      <div className="flex-1 px-5 py-5">
+        <div className="text-sm font-medium tracking-wide text-neutral-500 uppercase">
+          {cat.label}
+        </div>
+        <div className="mt-1 text-2xl font-semibold tabular-nums text-neutral-900">
+          {moneyFormatterCents.format(cat.spent)}
+        </div>
+        <div className="mt-1 text-xs text-neutral-500">
+          of {moneyFormatter.format(cat.fortnightTarget)} fortnight target, day{" "}
+          {cycle.dayOfCycle} of {CYCLE_LENGTH_DAYS}
+        </div>
+        <div className={`mt-2 text-xs font-medium ${STATUS_TEXT[cat.status]}`}>
+          {paceMoney(cat.variance)} {overUnder}
+        </div>
+      </div>
+    </li>
+  );
+}

@@ -9,6 +9,8 @@ export type UpcomingBill = {
   source: BillSource;
   /** Optional secondary amount shown in parens, e.g. minimum payment for credit cards. */
   note?: string;
+  /** Set only for source = "manual" — drives mark-as-paid actions in the UI. */
+  manualBillId?: number;
 };
 
 export type PlaidFrequency =
@@ -152,13 +154,15 @@ export function getUpcomingBills(db: Database.Database, days: number): UpcomingB
   //      60-day window should show up four times, not once.
   //    Rows missing the field their cadence requires are skipped silently.
   const manual = db.prepare(
-    `SELECT name, amount, day_of_month, frequency, next_due_date FROM recurring_bills`
+    `SELECT id, name, amount, day_of_month, frequency, next_due_date, last_paid_date FROM recurring_bills`
   ).all() as {
+    id: number;
     name: string;
     amount: number;
     day_of_month: number | null;
     frequency: string;
     next_due_date: string | null;
+    last_paid_date: string | null;
   }[];
 
   for (const m of manual) {
@@ -166,17 +170,22 @@ export function getUpcomingBills(db: Database.Database, days: number): UpcomingB
       if (m.day_of_month === null) continue;
       const next = nextDayOfMonthDate(today, m.day_of_month);
       if (next < windowStart || next > windowEnd) continue;
-      bills.push({ date: next, name: m.name, amount: m.amount, source: "manual" });
+      if (isOccurrencePaid(m.last_paid_date, next, "month")) continue;
+      bills.push({ date: next, name: m.name, amount: m.amount, source: "manual", manualBillId: m.id });
     } else if (m.frequency === "fortnightly" || m.frequency === "weekly") {
       if (!m.next_due_date) continue;
       const intervalDays = m.frequency === "fortnightly" ? 14 : 7;
       let d = new Date(m.next_due_date + "T00:00:00Z");
       if (isNaN(d.getTime())) continue;
       // Fast-forward to the first occurrence on or after windowStart, then
-      // emit every occurrence up to windowEnd inclusive.
+      // emit every occurrence up to windowEnd inclusive. Each occurrence's
+      // own preceding interval defines its billing period, so a single
+      // last_paid_date only suppresses the one cycle it covers.
       while (d < windowStart) d = addDays(d, intervalDays);
       while (d <= windowEnd) {
-        bills.push({ date: d, name: m.name, amount: m.amount, source: "manual" });
+        if (!isOccurrencePaid(m.last_paid_date, d, intervalDays)) {
+          bills.push({ date: d, name: m.name, amount: m.amount, source: "manual", manualBillId: m.id });
+        }
         d = addDays(d, intervalDays);
       }
     }
@@ -188,6 +197,37 @@ export function getUpcomingBills(db: Database.Database, days: number): UpcomingB
 
 function startOfUtcDay(d: Date): Date {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+/**
+ * For a manual bill occurrence on `occurrenceDate`, return true if
+ * `lastPaidDate` falls within the billing period that precedes it. The
+ * period is `[occurrenceDate - interval, occurrenceDate - 1]` inclusive,
+ * where interval is `14`/`7` days for fortnightly/weekly, or one calendar
+ * month (same day-of-month, clamped) for monthly. A null or unparseable
+ * `lastPaidDate` returns false — nothing to suppress.
+ */
+export function isOccurrencePaid(
+  lastPaidDate: string | null,
+  occurrenceDate: Date,
+  interval: number | "month",
+): boolean {
+  if (!lastPaidDate) return false;
+  const paid = new Date(lastPaidDate + "T00:00:00Z");
+  if (isNaN(paid.getTime())) return false;
+
+  let periodStart: Date;
+  if (interval === "month") {
+    const y = occurrenceDate.getUTCFullYear();
+    const m = occurrenceDate.getUTCMonth();
+    const d = occurrenceDate.getUTCDate();
+    const daysPrevMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    periodStart = new Date(Date.UTC(y, m - 1, Math.min(d, daysPrevMonth)));
+  } else {
+    periodStart = addDays(occurrenceDate, -interval);
+  }
+  const periodEnd = addDays(occurrenceDate, -1);
+  return paid >= periodStart && paid <= periodEnd;
 }
 
 /** Next calendar date matching the given day-of-month, clamping to month length. */

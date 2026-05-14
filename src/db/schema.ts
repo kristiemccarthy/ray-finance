@@ -169,7 +169,8 @@ export function migrate(db: Database.Database): void {
       type TEXT,
       account_id TEXT,
       frequency TEXT NOT NULL DEFAULT 'monthly',
-      next_due_date TEXT
+      next_due_date TEXT,
+      last_paid_date TEXT
     );
 
     CREATE TABLE IF NOT EXISTS milestones (
@@ -275,6 +276,9 @@ export function migrate(db: Database.Database): void {
   if (!billCols.some(c => c.name === "frequency")) {
     db.exec(`ALTER TABLE recurring_bills ADD COLUMN frequency TEXT NOT NULL DEFAULT 'monthly'`);
     db.exec(`ALTER TABLE recurring_bills ADD COLUMN next_due_date TEXT`);
+  }
+  if (!billCols.some(c => c.name === "last_paid_date")) {
+    db.exec(`ALTER TABLE recurring_bills ADD COLUMN last_paid_date TEXT`);
   }
 
   // Migrate: add raw_name to transactions so the canonical (post-alias)

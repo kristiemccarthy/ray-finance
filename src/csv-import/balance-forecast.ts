@@ -24,7 +24,7 @@ import { readFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { getDb } from "../db/connection.js";
-import { predictNextBillDate } from "../db/bills.js";
+import { predictNextBillDate, isOccurrencePaid } from "../db/bills.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -206,7 +206,7 @@ export function forecastBalance(options: ForecastOptions): ForecastResult {
 
   const manualRows = db
     .prepare(
-      `SELECT name, amount, day_of_month, frequency, next_due_date
+      `SELECT name, amount, day_of_month, frequency, next_due_date, last_paid_date
          FROM recurring_bills`,
     )
     .all() as ManualBillRow[];
@@ -389,6 +389,7 @@ interface ManualBillRow {
   day_of_month: number | null;
   frequency: string;
   next_due_date: string | null;
+  last_paid_date: string | null;
 }
 
 /**
@@ -467,7 +468,7 @@ function pushMonthlyOccurrences(
     const day = Math.min(dayOfMonth, daysInMonth);
     const date = new Date(Date.UTC(y, m, day));
     if (date > windowEnd) break;
-    if (date >= windowStart) {
+    if (date >= windowStart && !isOccurrencePaid(row.last_paid_date, date, "month")) {
       items.push({
         date: toYMD(date),
         description: row.name,
@@ -499,12 +500,14 @@ function pushIntervalOccurrences(
     d = new Date(d.getTime() + intervalDays * MS_PER_DAY);
   }
   while (d <= windowEnd) {
-    items.push({
-      date: toYMD(d),
-      description: row.name,
-      amount: row.amount,
-      source: "manual",
-    });
+    if (!isOccurrencePaid(row.last_paid_date, d, intervalDays)) {
+      items.push({
+        date: toYMD(d),
+        description: row.name,
+        amount: row.amount,
+        source: "manual",
+      });
+    }
     d = new Date(d.getTime() + intervalDays * MS_PER_DAY);
   }
 }

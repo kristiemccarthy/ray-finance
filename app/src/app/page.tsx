@@ -1,6 +1,9 @@
+import Link from "next/link";
 import { Calendar } from "lucide-react";
 import { getDb } from "@ray/db/connection";
 import { getUpcomingBills, type UpcomingBill } from "@ray/db/bills";
+import { markBillPaid } from "./actions";
+import { MarkPaidButton } from "@/components/mark-paid-button";
 
 export const dynamic = "force-dynamic";
 
@@ -76,6 +79,15 @@ export default function Home() {
             ))}
           </ul>
         )}
+
+        <p className="mt-10 text-center text-xs text-neutral-400">
+          <Link
+            href="/bills/manage"
+            className="underline-offset-2 hover:text-neutral-700 hover:underline"
+          >
+            Manage bills
+          </Link>
+        </p>
       </div>
     </main>
   );
@@ -122,6 +134,10 @@ function BillRow({
           <span className="ml-2 text-xs text-neutral-400">{sourceLabel}</span>
         </div>
       </div>
+
+      {bill.source === "manual" && bill.manualBillId !== undefined && (
+        <MarkPaidButton action={markBillPaid.bind(null, bill.manualBillId)} />
+      )}
 
       <div className="shrink-0 text-base font-medium tabular-nums text-neutral-900">
         {moneyFormatter.format(bill.amount)}
