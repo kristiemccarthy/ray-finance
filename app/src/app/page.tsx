@@ -2,8 +2,9 @@ import Link from "next/link";
 import { Calendar } from "lucide-react";
 import { getDb } from "@ray/db/connection";
 import { getUpcomingBills, type UpcomingBill } from "@ray/db/bills";
-import { markBillPaid } from "./actions";
+import { markBillPaid, refreshData } from "./actions";
 import { MarkPaidButton } from "@/components/mark-paid-button";
+import { RefreshDataControl } from "@/components/refresh-data-control";
 
 export const dynamic = "force-dynamic";
 
@@ -50,9 +51,14 @@ export default function Home() {
   return (
     <main className="min-h-screen bg-stone-50 text-neutral-800">
       <div className="mx-auto max-w-2xl px-6 py-16">
-        <h1 className="mb-12 text-center text-sm font-medium tracking-wide text-neutral-500 uppercase">
-          Upcoming bills
-        </h1>
+        <div className="relative mb-12">
+          <h1 className="text-center text-sm font-medium tracking-wide text-neutral-500 uppercase">
+            Upcoming bills
+          </h1>
+          <div className="absolute right-0 top-1/2 -translate-y-1/2">
+            <RefreshDataControl action={refreshData} />
+          </div>
+        </div>
 
         <section className="mb-14 text-center">
           <div className="text-3xl font-semibold tabular-nums text-neutral-900">

@@ -3,6 +3,10 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { getDb } from "@ray/db/connection";
+import {
+  refreshFromDirectory,
+  type RefreshSummary,
+} from "@ray/csv-import/refresh";
 
 // ---------------------------------------------------------------------------
 // Types shared with the bill form
@@ -195,6 +199,28 @@ function revalidateBillViews(): void {
   revalidatePath("/forecast");
   revalidatePath("/fortnight");
   revalidatePath("/bills/manage");
+}
+
+// ---------------------------------------------------------------------------
+// Refresh data (CSV / PDF re-import)
+// ---------------------------------------------------------------------------
+
+/** Where bank statement exports land. Hard-coded for this single-user app. */
+const STATEMENTS_DIR = String.raw`C:\Users\krist\Downloads\Bank statements`;
+
+/**
+ * Re-import every configured statement file from the downloads directory.
+ * Each source is run in its own try/catch by `refreshFromDirectory`, so a
+ * malformed CSV doesn't block the others. Re-renders every view that
+ * derives from transactions so the UI catches up in one round-trip.
+ */
+export async function refreshData(): Promise<RefreshSummary> {
+  const summary = await refreshFromDirectory(STATEMENTS_DIR);
+  revalidatePath("/");
+  revalidatePath("/forecast");
+  revalidatePath("/fortnight");
+  revalidatePath("/balances");
+  return summary;
 }
 
 // ---------------------------------------------------------------------------
