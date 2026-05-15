@@ -26,7 +26,11 @@
       "Bash(grep -oE '<span>\\(Mon|Tue|Wed|Thu|Fri|Sat|Sun\\), [0-9]{1,2} [A-Z][a-z]{2}</span>' ssr-bills.html)",
       "Bash(grep -oE '\\(Mon|Tue|Wed|Thu|Fri|Sat|Sun\\), [0-9]{1,2} [A-Z][a-z]{2}' ssr-forecast.html)",
       "Bash(grep -v \"^$\")",
-      "Bash(npm i *)"
+      "Bash(npm i *)",
+      "Bash(node -e \"const {getDb} = require\\('./dist/db/connection.js'\\); const db = getDb\\(\\); console.log\\(db.prepare\\('SELECT category, monthly_limit FROM budgets'\\).all\\(\\)\\);\")",
+      "Bash(node -e \"const {getDb} = require\\('./dist/db/connection.js'\\); const db = getDb\\(\\); console.log\\(db.prepare\\(\\\\\"SELECT DISTINCT category FROM transactions ORDER BY category\\\\\"\\).all\\(\\)\\);\")",
+      "Bash(node -e \"const {getDb} = require\\('./dist/db/connection.js'\\); const db = getDb\\(\\); console.log\\(db.prepare\\(\\\\\"SELECT description, last_date FROM recurring WHERE is_active=1 AND stream_type='inflow' ORDER BY last_date DESC LIMIT 5\\\\\"\\).all\\(\\)\\);\")",
+      "Bash(npx vitest *)"
     ]
   }
 }
