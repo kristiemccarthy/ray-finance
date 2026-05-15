@@ -24,7 +24,7 @@ import { readFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { getDb } from "../db/connection.js";
-import { predictNextBillDate, isOccurrencePaid } from "../db/bills.js";
+import { predictNextBillDate, isOccurrencePaid, addMonths } from "../db/bills.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -432,6 +432,8 @@ function projectRecurringStreams(
  *   - fortnightly / weekly: step from `next_due_date` by 14 / 7 days,
  *     fast-forwarding to the first occurrence inside the window then
  *     emitting until we cross the end.
+ *   - bi-monthly / quarterly / yearly: same anchor as fortnightly/weekly
+ *     but step in 2 / 3 / 12 calendar months, with end-of-month clamping.
  * Rows missing the field their cadence requires are skipped silently.
  */
 function projectManualBills(
@@ -448,6 +450,15 @@ function projectManualBills(
       if (!row.next_due_date) continue;
       const intervalDays = row.frequency === "fortnightly" ? 14 : 7;
       pushIntervalOccurrences(items, row, windowStart, windowEnd, intervalDays);
+    } else if (
+      row.frequency === "bi-monthly" ||
+      row.frequency === "quarterly" ||
+      row.frequency === "yearly"
+    ) {
+      if (!row.next_due_date) continue;
+      const intervalMonths =
+        row.frequency === "bi-monthly" ? 2 : row.frequency === "quarterly" ? 3 : 12;
+      pushMonthIntervalOccurrences(items, row, windowStart, windowEnd, intervalMonths);
     }
     // Unknown frequencies fall through and emit nothing.
   }
@@ -468,7 +479,7 @@ function pushMonthlyOccurrences(
     const day = Math.min(dayOfMonth, daysInMonth);
     const date = new Date(Date.UTC(y, m, day));
     if (date > windowEnd) break;
-    if (date >= windowStart && !isOccurrencePaid(row.last_paid_date, date, "month")) {
+    if (date >= windowStart && !isOccurrencePaid(row.last_paid_date, date, { months: 1 })) {
       items.push({
         date: toYMD(date),
         description: row.name,
@@ -509,6 +520,36 @@ function pushIntervalOccurrences(
       });
     }
     d = new Date(d.getTime() + intervalDays * MS_PER_DAY);
+  }
+}
+
+/**
+ * Sibling of `pushIntervalOccurrences` for calendar-month cadences
+ * (bi-monthly / quarterly / yearly). Steps via `addMonths` so end-of-month
+ * anchors clamp instead of overflowing into the next month.
+ */
+function pushMonthIntervalOccurrences(
+  items: ForecastItem[],
+  row: ManualBillRow,
+  windowStart: Date,
+  windowEnd: Date,
+  intervalMonths: number,
+): void {
+  let d = new Date(row.next_due_date! + "T00:00:00Z");
+  if (isNaN(d.getTime())) return;
+  while (d < windowStart) {
+    d = addMonths(d, intervalMonths);
+  }
+  while (d <= windowEnd) {
+    if (!isOccurrencePaid(row.last_paid_date, d, { months: intervalMonths })) {
+      items.push({
+        date: toYMD(d),
+        description: row.name,
+        amount: row.amount,
+        source: "manual",
+      });
+    }
+    d = addMonths(d, intervalMonths);
   }
 }
 

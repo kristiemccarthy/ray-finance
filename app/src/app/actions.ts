@@ -8,7 +8,13 @@ import { getDb } from "@ray/db/connection";
 // Types shared with the bill form
 // ---------------------------------------------------------------------------
 
-export type BillFrequency = "monthly" | "fortnightly" | "weekly";
+export type BillFrequency =
+  | "monthly"
+  | "bi-monthly"
+  | "quarterly"
+  | "yearly"
+  | "fortnightly"
+  | "weekly";
 export type AmountType = "fixed" | "range";
 
 export type BillFormValues = {
@@ -78,7 +84,15 @@ function valuesFromFormData(formData: FormData): BillFormValues {
 }
 
 function normaliseFrequency(s: string): BillFrequency {
-  if (s === "fortnightly" || s === "weekly") return s;
+  if (
+    s === "fortnightly" ||
+    s === "weekly" ||
+    s === "bi-monthly" ||
+    s === "quarterly" ||
+    s === "yearly"
+  ) {
+    return s;
+  }
   return "monthly";
 }
 

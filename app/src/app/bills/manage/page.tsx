@@ -28,13 +28,17 @@ const dateFormatter = new Intl.DateTimeFormat("en-AU", {
   timeZone: "Australia/Sydney",
 });
 
-// Ordered for display: monthly first, then fortnightly, then weekly. Anything
-// else falls to the end so we don't accidentally hide rows with unexpected
-// frequency strings.
+// Ordered for display: calendar-month cadences first (monthly → bi-monthly
+// → quarterly → yearly), then interval cadences (fortnightly → weekly).
+// Anything else falls to the end so we don't accidentally hide rows with
+// unexpected frequency strings.
 const FREQUENCY_ORDER: Record<string, number> = {
   monthly: 0,
-  fortnightly: 1,
-  weekly: 2,
+  "bi-monthly": 1,
+  quarterly: 2,
+  yearly: 3,
+  fortnightly: 4,
+  weekly: 5,
 };
 
 function frequencyLabel(f: string): string {

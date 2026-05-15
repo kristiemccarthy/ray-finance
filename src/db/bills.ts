@@ -55,7 +55,7 @@ function addDays(d: Date, n: number): Date {
 }
 
 /** Add months, clamping to the last day of the target month (Jan 31 + 1mo → Feb 28/29). */
-function addMonths(d: Date, n: number): Date {
+export function addMonths(d: Date, n: number): Date {
   const y = d.getUTCFullYear();
   const m = d.getUTCMonth() + n;
   const day = d.getUTCDate();
@@ -145,13 +145,16 @@ export function getUpcomingBills(db: Database.Database, days: number): UpcomingB
     }
   }
 
-  // 3. Manual recurring_bills — three cadences:
+  // 3. Manual recurring_bills — three families of cadence:
   //    - monthly: emit the next match of `day_of_month` strictly after today
   //      if it lands in the window (single occurrence, matching the long-
   //      standing behaviour for credit/liability dates above).
   //    - fortnightly / weekly: emit *every* occurrence in the window, walked
-  //      from `next_due_date` in 14- or 7-day steps. A fortnightly bill in a
-  //      60-day window should show up four times, not once.
+  //      from `next_due_date` in 14- or 7-day steps.
+  //    - bi-monthly / quarterly / yearly: walk forward in 2 / 3 / 12 calendar
+  //      months from `next_due_date`, emitting any occurrence that lands in
+  //      the window. Calendar-month addition clamps end-of-month edges
+  //      (Jan 31 + 1mo → Feb 28/29) so a bill due on the 31st survives Feb.
   //    Rows missing the field their cadence requires are skipped silently.
   const manual = db.prepare(
     `SELECT id, name, amount, day_of_month, frequency, next_due_date, last_paid_date FROM recurring_bills`
@@ -170,7 +173,7 @@ export function getUpcomingBills(db: Database.Database, days: number): UpcomingB
       if (m.day_of_month === null) continue;
       const next = nextDayOfMonthDate(today, m.day_of_month);
       if (next < windowStart || next > windowEnd) continue;
-      if (isOccurrencePaid(m.last_paid_date, next, "month")) continue;
+      if (isOccurrencePaid(m.last_paid_date, next, { months: 1 })) continue;
       bills.push({ date: next, name: m.name, amount: m.amount, source: "manual", manualBillId: m.id });
     } else if (m.frequency === "fortnightly" || m.frequency === "weekly") {
       if (!m.next_due_date) continue;
@@ -188,6 +191,18 @@ export function getUpcomingBills(db: Database.Database, days: number): UpcomingB
         }
         d = addDays(d, intervalDays);
       }
+    } else if (m.frequency === "bi-monthly" || m.frequency === "quarterly" || m.frequency === "yearly") {
+      if (!m.next_due_date) continue;
+      const intervalMonths = m.frequency === "bi-monthly" ? 2 : m.frequency === "quarterly" ? 3 : 12;
+      let d = new Date(m.next_due_date + "T00:00:00Z");
+      if (isNaN(d.getTime())) continue;
+      while (d < windowStart) d = addMonths(d, intervalMonths);
+      while (d <= windowEnd) {
+        if (!isOccurrencePaid(m.last_paid_date, d, { months: intervalMonths })) {
+          bills.push({ date: d, name: m.name, amount: m.amount, source: "manual", manualBillId: m.id });
+        }
+        d = addMonths(d, intervalMonths);
+      }
     }
   }
 
@@ -202,27 +217,25 @@ function startOfUtcDay(d: Date): Date {
 /**
  * For a manual bill occurrence on `occurrenceDate`, return true if
  * `lastPaidDate` falls within the billing period that precedes it. The
- * period is `[occurrenceDate - interval, occurrenceDate - 1]` inclusive,
- * where interval is `14`/`7` days for fortnightly/weekly, or one calendar
- * month (same day-of-month, clamped) for monthly. A null or unparseable
- * `lastPaidDate` returns false — nothing to suppress.
+ * period is `[occurrenceDate - interval, occurrenceDate - 1]` inclusive.
+ * `interval` is either a number of days (7 / 14 for weekly / fortnightly) or
+ * `{ months: N }` for calendar-month cadences (1 = monthly, 2 = bi-monthly,
+ * 3 = quarterly, 12 = yearly). Month arithmetic clamps to the last day of
+ * the target month so a bill due on the 31st walks back cleanly through Feb.
+ * A null or unparseable `lastPaidDate` returns false — nothing to suppress.
  */
 export function isOccurrencePaid(
   lastPaidDate: string | null,
   occurrenceDate: Date,
-  interval: number | "month",
+  interval: number | { months: number },
 ): boolean {
   if (!lastPaidDate) return false;
   const paid = new Date(lastPaidDate + "T00:00:00Z");
   if (isNaN(paid.getTime())) return false;
 
   let periodStart: Date;
-  if (interval === "month") {
-    const y = occurrenceDate.getUTCFullYear();
-    const m = occurrenceDate.getUTCMonth();
-    const d = occurrenceDate.getUTCDate();
-    const daysPrevMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
-    periodStart = new Date(Date.UTC(y, m - 1, Math.min(d, daysPrevMonth)));
+  if (typeof interval === "object") {
+    periodStart = addMonths(occurrenceDate, -interval.months);
   } else {
     periodStart = addDays(occurrenceDate, -interval);
   }

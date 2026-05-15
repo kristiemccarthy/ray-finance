@@ -159,6 +159,9 @@ export function BillForm({
           className={inputClass(false)}
         >
           <option value="monthly">Monthly</option>
+          <option value="bi-monthly">Bi-monthly</option>
+          <option value="quarterly">Quarterly</option>
+          <option value="yearly">Yearly</option>
           <option value="fortnightly">Fortnightly</option>
           <option value="weekly">Weekly</option>
         </select>
