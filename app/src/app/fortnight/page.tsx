@@ -1,4 +1,6 @@
+import Link from "next/link";
 import { getDb } from "@ray/db/connection";
+import { getPendingSummary } from "@ray/pending";
 
 export const dynamic = "force-dynamic";
 
@@ -263,6 +265,7 @@ export default function FortnightPage() {
   const cycle = computeCurrentCycle(today);
   const { categories, other } = loadCategoryStatuses(cycle);
   const billsPaid = loadBillsPaid(cycle);
+  const pending = getPendingSummary();
 
   const totalSpent = categories.reduce((s, c) => s + c.spent, 0);
   const totalFortnightTarget = categories.reduce(
@@ -272,33 +275,60 @@ export default function FortnightPage() {
   const totalExpected = cycle.fractionElapsed * totalFortnightTarget;
   const totalVariance = totalSpent - totalExpected;
   const totalStatus = statusFromRatio(totalSpent, totalExpected);
+  // Lead with what's left, not what's spent. Negative = blown the budget.
+  // Strict `< 0` so an exact-zero remaining still reads as "$0 remaining"
+  // rather than the louder "over budget" framing.
+  const totalRemaining = totalFortnightTarget - totalSpent;
+  const isOverBudget = totalRemaining < 0;
 
   return (
     <main className="text-neutral-800">
       <div className="mx-auto max-w-2xl px-6 py-16">
-        <h1 className="mb-12 text-center text-sm font-medium tracking-wide text-neutral-500 uppercase">
+        <h1 className="text-center text-sm font-medium tracking-wide text-neutral-500 uppercase">
           This Fortnight
         </h1>
 
-        <section className="mb-14 text-center">
+        {pending.total > 0 && (
+          <p className="mt-3 text-center">
+            <Link
+              href="/"
+              className="text-xs tabular-nums text-neutral-500 underline-offset-2 hover:text-neutral-800 hover:underline"
+            >
+              Pending: {moneyFormatter.format(pending.total)} across{" "}
+              {pending.count}{" "}
+              {pending.count === 1 ? "transaction" : "transactions"}
+            </Link>
+          </p>
+        )}
+
+        <section className="mt-12 mb-14 text-center">
           <div className="text-sm text-neutral-500">
             Day {cycle.dayOfCycle} of {CYCLE_LENGTH_DAYS}
           </div>
-          <div className="mt-2 text-3xl font-semibold tabular-nums text-neutral-900">
-            {moneyFormatterCents.format(totalSpent)}
+          <div
+            className={`mt-2 text-3xl font-semibold tabular-nums ${
+              isOverBudget ? "text-red-600" : "text-neutral-900"
+            }`}
+          >
+            {isOverBudget
+              ? `${moneyFormatter.format(Math.abs(totalRemaining))} over budget`
+              : `${moneyFormatter.format(totalRemaining)} remaining`}
           </div>
           <div className="mt-1 text-sm text-neutral-500">
-            of {moneyFormatter.format(totalExpected)} expected by now
+            across {moneyFormatter.format(totalFortnightTarget)} fortnight budget
+          </div>
+          <div className="mt-2 text-sm text-neutral-500 tabular-nums">
+            {moneyFormatter.format(totalSpent)} spent so far
           </div>
           <div className={`mt-3 text-sm font-medium ${STATUS_TEXT[totalStatus]}`}>
             {paceMoney(totalVariance)}{" "}
-            {totalVariance >= 0 ? "ahead of" : "behind"} expected pace
+            {totalVariance >= 0 ? "over" : "under"} pace
           </div>
         </section>
 
         <ul className="space-y-3">
           {categories.map((c) => (
-            <CategoryCard key={c.category} cat={c} cycle={cycle} />
+            <CategoryCard key={c.category} cat={c} />
           ))}
         </ul>
 
@@ -327,8 +357,15 @@ export default function FortnightPage() {
   );
 }
 
-function CategoryCard({ cat, cycle }: { cat: CategoryStatus; cycle: Cycle }) {
+function CategoryCard({ cat }: { cat: CategoryStatus }) {
   const overUnder = cat.variance >= 0 ? "over pace" : "under pace";
+  // Same framing as the hero: lead with remaining, flip to "over budget"
+  // only on strictly negative remaining. Stripe colour stays driven by
+  // pace ratio so being-over-budget and being-over-pace can disagree
+  // visually (which is intentional — you could be just-barely-over budget
+  // while still under pace late in the cycle).
+  const remaining = cat.fortnightTarget - cat.spent;
+  const isOverBudget = remaining < 0;
   return (
     <li className="flex overflow-hidden rounded-md border border-stone-200 bg-white">
       <span aria-hidden className={`w-1 shrink-0 ${STATUS_STRIPE[cat.status]}`} />
@@ -336,12 +373,18 @@ function CategoryCard({ cat, cycle }: { cat: CategoryStatus; cycle: Cycle }) {
         <div className="text-sm font-medium tracking-wide text-neutral-500 uppercase">
           {cat.label}
         </div>
-        <div className="mt-1 text-2xl font-semibold tabular-nums text-neutral-900">
-          {moneyFormatterCents.format(cat.spent)}
+        <div
+          className={`mt-1 text-2xl font-semibold tabular-nums ${
+            isOverBudget ? "text-red-600" : "text-neutral-900"
+          }`}
+        >
+          {isOverBudget
+            ? `${moneyFormatter.format(Math.abs(remaining))} over budget`
+            : `${moneyFormatter.format(remaining)} remaining`}
         </div>
-        <div className="mt-1 text-xs text-neutral-500">
-          of {moneyFormatter.format(cat.fortnightTarget)} fortnight target, day{" "}
-          {cycle.dayOfCycle} of {CYCLE_LENGTH_DAYS}
+        <div className="mt-1 text-xs text-neutral-500 tabular-nums">
+          {moneyFormatterCents.format(cat.spent)} spent of{" "}
+          {moneyFormatter.format(cat.fortnightTarget)}
         </div>
         <div className={`mt-2 text-xs font-medium ${STATUS_TEXT[cat.status]}`}>
           {paceMoney(cat.variance)} {overUnder}

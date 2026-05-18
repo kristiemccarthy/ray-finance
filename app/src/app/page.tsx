@@ -2,9 +2,10 @@ import Link from "next/link";
 import { Calendar } from "lucide-react";
 import { getDb } from "@ray/db/connection";
 import { getUpcomingBills, type UpcomingBill } from "@ray/db/bills";
-import { markBillPaid, refreshData } from "./actions";
+import { markBillPaid, refreshData, updatePending } from "./actions";
 import { MarkPaidButton } from "@/components/mark-paid-button";
 import { RefreshDataControl } from "@/components/refresh-data-control";
+import { UpdatePendingControl } from "@/components/update-pending-control";
 
 export const dynamic = "force-dynamic";
 
@@ -55,7 +56,8 @@ export default function Home() {
           <h1 className="text-center text-sm font-medium tracking-wide text-neutral-500 uppercase">
             Upcoming bills
           </h1>
-          <div className="absolute right-0 top-1/2 -translate-y-1/2">
+          <div className="absolute right-0 top-1/2 flex -translate-y-1/2 items-center gap-2">
+            <UpdatePendingControl action={updatePending} />
             <RefreshDataControl action={refreshData} />
           </div>
         </div>

@@ -8,6 +8,13 @@ import {
   type RefreshSummary,
 } from "@ray/csv-import/refresh";
 import {
+  extractPendingFromImage,
+  replacePending,
+  getPendingSummary,
+  type PendingSummary,
+  type SupportedImageMimeType,
+} from "@ray/pending";
+import {
   forecastBalance,
   loadForecastSources,
   type ForecastResult,
@@ -231,6 +238,67 @@ export async function refreshData(): Promise<RefreshSummary> {
   revalidatePath("/fortnight");
   revalidatePath("/balances");
   return summary;
+}
+
+// ---------------------------------------------------------------------------
+// Update pending (Claude vision)
+// ---------------------------------------------------------------------------
+
+/**
+ * Outcome of an update-pending attempt. `ok: true` always carries a
+ * `summary`; `ok: false` always carries an `error`. The client toast
+ * decides which copy to show based on the discriminator.
+ */
+export type UpdatePendingResult =
+  | { ok: true; summary: PendingSummary }
+  | { ok: false; error: string };
+
+const SUPPORTED_PENDING_MIME_TYPES: SupportedImageMimeType[] = [
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+];
+
+/**
+ * Take an uploaded screenshot of pending transactions, run it through
+ * Claude vision, and replace the `pending_transactions` table with the
+ * extracted rows. Returns the new summary on success, or a string error
+ * for the toast to display. Never throws — anything that goes wrong is
+ * caught and surfaced through the result type so the client doesn't have
+ * to reach into Next's error boundary.
+ *
+ * Cost reminder: each successful call burns ~1–2 cents of API budget.
+ */
+export async function updatePending(
+  formData: FormData,
+): Promise<UpdatePendingResult> {
+  const file = formData.get("file");
+  if (!(file instanceof File)) {
+    return { ok: false, error: "No file uploaded." };
+  }
+  const mimeType = file.type as SupportedImageMimeType;
+  if (!SUPPORTED_PENDING_MIME_TYPES.includes(mimeType)) {
+    return {
+      ok: false,
+      error: `Unsupported image type "${file.type}". Use PNG, JPEG, WebP, or GIF.`,
+    };
+  }
+
+  const arrayBuffer = await file.arrayBuffer();
+  const imageBytes = Buffer.from(arrayBuffer);
+
+  try {
+    const rows = await extractPendingFromImage(imageBytes, mimeType);
+    replacePending(rows);
+    const summary = getPendingSummary();
+    revalidatePath("/");
+    revalidatePath("/fortnight");
+    return { ok: true, summary };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: message };
+  }
 }
 
 // ---------------------------------------------------------------------------

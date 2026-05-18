@@ -173,6 +173,13 @@ export function migrate(db: Database.Database): void {
       last_paid_date TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS pending_transactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      description TEXT NOT NULL,
+      amount REAL NOT NULL,
+      date TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS milestones (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
