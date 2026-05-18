@@ -7,6 +7,16 @@ import {
   refreshFromDirectory,
   type RefreshSummary,
 } from "@ray/csv-import/refresh";
+import {
+  forecastBalance,
+  loadForecastSources,
+  type ForecastResult,
+} from "@ray/csv-import/balance-forecast";
+import {
+  applyScenario,
+  sanitiseScenario,
+  type Scenario,
+} from "@ray/forecast/scenario";
 
 // ---------------------------------------------------------------------------
 // Types shared with the bill form
@@ -287,6 +297,55 @@ export async function updateBill(
 
   revalidateBillViews();
   redirect("/bills/manage");
+}
+
+// ---------------------------------------------------------------------------
+// What-if scenario forecast
+// ---------------------------------------------------------------------------
+
+const WHAT_IF_ACCOUNT_ID = "csv:st-george:personal";
+
+export type ScenarioForecastResult =
+  | { ok: true; result: ForecastResult }
+  | { ok: false; error: string };
+
+/** Allowed horizon values — anything else gets clamped to the default. */
+const ALLOWED_HORIZONS = [4, 7, 13, 26] as const;
+const DEFAULT_HORIZON = 4;
+
+/**
+ * Recompute the balance forecast with a scenario applied. Loads the same
+ * sources the baseline forecast uses, runs them through `applyScenario`,
+ * then hands the transformed sources to `forecastBalance`.
+ *
+ * `horizon` is the number of cycles to project (4 / 7 / 13 / 26). Unknown
+ * values fall back to 4 to keep the action defensive against client drift.
+ *
+ * Errors never throw — they come back through the result object so the
+ * client can show a toast and keep the existing forecast on screen.
+ */
+export async function computeScenarioForecast(
+  scenario: Scenario,
+  horizon: number = DEFAULT_HORIZON,
+): Promise<ScenarioForecastResult> {
+  try {
+    const cycles = (ALLOWED_HORIZONS as readonly number[]).includes(horizon)
+      ? horizon
+      : DEFAULT_HORIZON;
+    const clean = sanitiseScenario(scenario);
+    const sources = loadForecastSources(WHAT_IF_ACCOUNT_ID);
+    const transformed = applyScenario(sources, clean);
+    const result = forecastBalance({
+      accountId: WHAT_IF_ACCOUNT_ID,
+      cycleAnchorDayOfWeek: 3,
+      numberOfCycles: cycles,
+      sources: transformed,
+    });
+    return { ok: true, result };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: message };
+  }
 }
 
 export async function deleteBill(id: number): Promise<void> {

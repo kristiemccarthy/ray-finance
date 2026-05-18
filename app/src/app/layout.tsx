@@ -48,6 +48,12 @@ export default function RootLayout({
               Retrospective
             </Link>
             <Link
+              href="/what-if"
+              className="font-medium text-neutral-700 hover:text-neutral-900"
+            >
+              What If?
+            </Link>
+            <Link
               href="/balances"
               className="font-medium text-neutral-700 hover:text-neutral-900"
             >

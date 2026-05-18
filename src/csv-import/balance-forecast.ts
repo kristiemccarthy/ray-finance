@@ -39,6 +39,19 @@ export interface ForecastOptions {
   cycleLengthDays?: number;
   /** Number of cycles to project. Defaults to 4. */
   numberOfCycles?: number;
+  /**
+   * Pre-built source rows. When supplied, the forecast skips the DB query
+   * step entirely and uses these instead — letting the caller pre-filter,
+   * override amounts, or inject hypothetical rows (see `/what-if`). When
+   * absent, sources are loaded fresh from the DB scoped to `accountId`.
+   */
+  sources?: ForecastSources;
+}
+
+export interface ForecastSources {
+  inflowRows: RecurringRow[];
+  outflowRows: RecurringRow[];
+  manualRows: ManualBillRow[];
 }
 
 export interface ForecastItem {
@@ -180,36 +193,12 @@ export function forecastBalance(options: ForecastOptions): ForecastResult {
   const windowStart = parseYMD(boundaries[0].startDate);
   const windowEnd = parseYMD(boundaries[boundaries.length - 1].endDate);
 
-  // 3. Pull source rows. Recurring streams are scoped to the requested
-  //    account; manual bills are taken in full (per the spec).
-  const inflowRows = db
-    .prepare(
-      `SELECT description, merchant_name, frequency, avg_amount, last_amount, last_date
-         FROM recurring
-        WHERE is_active = 1
-          AND stream_type = 'inflow'
-          AND account_id = ?
-          AND last_date IS NOT NULL`,
-    )
-    .all(accountId) as RecurringRow[];
-
-  const outflowRows = db
-    .prepare(
-      `SELECT description, merchant_name, frequency, avg_amount, last_amount, last_date
-         FROM recurring
-        WHERE is_active = 1
-          AND stream_type = 'outflow'
-          AND account_id = ?
-          AND last_date IS NOT NULL`,
-    )
-    .all(accountId) as RecurringRow[];
-
-  const manualRows = db
-    .prepare(
-      `SELECT name, amount, day_of_month, frequency, next_due_date, last_paid_date
-         FROM recurring_bills`,
-    )
-    .all() as ManualBillRow[];
+  // 3. Pull source rows. Either honour pre-built sources from the caller
+  //    (e.g. the /what-if scenario engine) or pull fresh from the DB.
+  //    Recurring streams are scoped to the requested account; manual bills
+  //    are taken in full (per the spec).
+  const { inflowRows, outflowRows, manualRows } =
+    options.sources ?? loadForecastSources(accountId);
 
   // 4. Project each source across the full window once, then bucket by cycle.
   const allIncome = projectRecurringStreams(inflowRows, windowStart, windowEnd);
@@ -319,6 +308,45 @@ export function forecastBalance(options: ForecastOptions): ForecastResult {
   return { accountId, currentBalance, cycles, lowestPoint, cycleAdjustment };
 }
 
+/**
+ * Pull the same source rows the in-line forecast would. Exposed so the
+ * /what-if scenario engine can fetch, mutate, and re-feed them without
+ * round-tripping through the DB twice.
+ */
+export function loadForecastSources(accountId: string): ForecastSources {
+  const db = getDb();
+  const inflowRows = db
+    .prepare(
+      `SELECT stream_id, description, merchant_name, frequency, avg_amount, last_amount, last_date
+         FROM recurring
+        WHERE is_active = 1
+          AND stream_type = 'inflow'
+          AND account_id = ?
+          AND last_date IS NOT NULL`,
+    )
+    .all(accountId) as RecurringRow[];
+
+  const outflowRows = db
+    .prepare(
+      `SELECT stream_id, description, merchant_name, frequency, avg_amount, last_amount, last_date
+         FROM recurring
+        WHERE is_active = 1
+          AND stream_type = 'outflow'
+          AND account_id = ?
+          AND last_date IS NOT NULL`,
+    )
+    .all(accountId) as RecurringRow[];
+
+  const manualRows = db
+    .prepare(
+      `SELECT id, name, amount, day_of_month, frequency, next_due_date, last_paid_date
+         FROM recurring_bills`,
+    )
+    .all() as ManualBillRow[];
+
+  return { inflowRows, outflowRows, manualRows };
+}
+
 /** Sum of all `monthly_limit` rows in `budgets`. Returns 0 if the table is empty. */
 function readTotalMonthlyBudgets(db: ReturnType<typeof getDb>): number {
   const row = db
@@ -374,7 +402,9 @@ function computeCycleBoundaries(
 // Projection
 // ---------------------------------------------------------------------------
 
-interface RecurringRow {
+export interface RecurringRow {
+  /** Plaid stream id — stable identifier for this stream. */
+  stream_id: string;
   description: string;
   merchant_name: string | null;
   frequency: string;
@@ -383,7 +413,9 @@ interface RecurringRow {
   last_date: string;
 }
 
-interface ManualBillRow {
+export interface ManualBillRow {
+  /** Primary key from `recurring_bills`. */
+  id: number;
   name: string;
   amount: number;
   day_of_month: number | null;
