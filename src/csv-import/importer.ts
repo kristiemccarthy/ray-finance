@@ -108,14 +108,27 @@ export async function runImport(config: ImportConfig): Promise<ImportResult> {
   const transactionIds = transactionRows.map((r) => r.transaction_id);
   const existingTransactionIds = selectExistingTransactionIds(db, transactionIds);
 
+  // Preserve PayPal-enrichment-derived category/subcategory across CSV
+  // refreshes. When `enriched_name` is set, the row's category was last
+  // calculated from the enriched merchant name; the bank's own description
+  // (which the CSV refresh would re-categorise from) doesn't know who the
+  // merchant is, so re-applying its category would regress the row. Rows
+  // without enrichment fall through to the freshly-derived CSV category
+  // as before — that's what the CASE expressions below encode.
+  //
+  // NOTE: keep SQL comments inside this template literal as /* ... */ form
+  // only. A `-- comment` here is parsed by TypeScript as the `--` decrement
+  // operator before the runtime ever sees the string, which breaks compile.
   const upsertTransaction = db.prepare(`
     INSERT INTO transactions (transaction_id, account_id, amount, date, name, raw_name, merchant_name, category, subcategory, pending, iso_currency_code, payment_channel, logo_url, website)
     VALUES (@transaction_id, @account_id, @amount, @date, @name, @raw_name, @merchant_name, @category, @subcategory, @pending, @iso_currency_code, @payment_channel, @logo_url, @website)
     ON CONFLICT(transaction_id) DO UPDATE SET
       amount=excluded.amount, date=excluded.date, name=excluded.name,
       raw_name=excluded.raw_name,
-      merchant_name=excluded.merchant_name, category=excluded.category,
-      subcategory=excluded.subcategory, pending=excluded.pending,
+      merchant_name=excluded.merchant_name,
+      category = CASE WHEN transactions.enriched_name IS NULL THEN excluded.category ELSE transactions.category END,
+      subcategory = CASE WHEN transactions.enriched_name IS NULL THEN excluded.subcategory ELSE transactions.subcategory END,
+      pending=excluded.pending,
       payment_channel=excluded.payment_channel, logo_url=excluded.logo_url,
       website=excluded.website
   `);

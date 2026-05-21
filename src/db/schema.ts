@@ -100,12 +100,30 @@ export function migrate(db: Database.Database): void {
 
     CREATE TABLE IF NOT EXISTS goals (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      type TEXT NOT NULL DEFAULT 'savings',
+      mode TEXT NOT NULL DEFAULT 'balance',
       name TEXT NOT NULL,
       target_amount REAL NOT NULL,
       current_amount REAL DEFAULT 0,
       target_date TEXT,
-      status TEXT DEFAULT 'active'
+      account_id TEXT,
+      category TEXT,
+      included_bill_ids TEXT,
+      status TEXT DEFAULT 'active',
+      created_at TEXT NOT NULL DEFAULT (date('now')),
+      archived_at TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS goal_contributions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      goal_id INTEGER NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+      amount REAL NOT NULL,
+      contribution_date TEXT NOT NULL,
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT (date('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_goal_contributions_goal_id
+      ON goal_contributions(goal_id);
 
     CREATE TABLE IF NOT EXISTS recurring (
       stream_id TEXT PRIMARY KEY,
@@ -180,6 +198,18 @@ export function migrate(db: Database.Database): void {
       date TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS paypal_transactions (
+      id TEXT PRIMARY KEY,
+      date TEXT NOT NULL,
+      merchant_name TEXT NOT NULL,
+      type TEXT,
+      currency TEXT,
+      gross REAL,
+      matched_transaction_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_paypal_date_amount
+      ON paypal_transactions(date, gross);
+
     CREATE TABLE IF NOT EXISTS milestones (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -241,6 +271,40 @@ export function migrate(db: Database.Database): void {
     db.exec(`ALTER TABLE goals RENAME COLUMN deadline TO target_date`);
   }
 
+  // Migrate: extend goals with multi-type columns (savings / category-cap /
+  // subscription-cap). Old single-type rows survive — `type` defaults to
+  // 'savings', which matches their original semantics. `created_at` is
+  // backfilled via UPDATE because SQLite can't put `(date('now'))` in a
+  // column default added via ALTER TABLE.
+  const goalCols2 = db.prepare(`PRAGMA table_info(goals)`).all() as { name: string }[];
+  if (!goalCols2.some(c => c.name === "type")) {
+    db.exec(`ALTER TABLE goals ADD COLUMN type TEXT NOT NULL DEFAULT 'savings'`);
+  }
+  if (!goalCols2.some(c => c.name === "account_id")) {
+    db.exec(`ALTER TABLE goals ADD COLUMN account_id TEXT`);
+  }
+  if (!goalCols2.some(c => c.name === "category")) {
+    db.exec(`ALTER TABLE goals ADD COLUMN category TEXT`);
+  }
+  if (!goalCols2.some(c => c.name === "included_bill_ids")) {
+    db.exec(`ALTER TABLE goals ADD COLUMN included_bill_ids TEXT`);
+  }
+  if (!goalCols2.some(c => c.name === "created_at")) {
+    db.exec(`ALTER TABLE goals ADD COLUMN created_at TEXT`);
+    db.exec(`UPDATE goals SET created_at = date('now') WHERE created_at IS NULL`);
+  }
+  if (!goalCols2.some(c => c.name === "archived_at")) {
+    db.exec(`ALTER TABLE goals ADD COLUMN archived_at TEXT`);
+  }
+
+  // Migrate: add `mode` to goals so savings can be tracked either against
+  // an account balance (existing behaviour) or against an explicit ledger of
+  // user-logged contributions. Pre-existing rows backfill to 'balance' which
+  // preserves their meaning verbatim.
+  if (!goalCols2.some(c => c.name === "mode")) {
+    db.exec(`ALTER TABLE goals ADD COLUMN mode TEXT NOT NULL DEFAULT 'balance'`);
+  }
+
   // Migrate: add balance_limit to accounts
   const acctCols = db.prepare(`PRAGMA table_info(accounts)`).all() as { name: string }[];
   if (!acctCols.some(c => c.name === "balance_limit")) {
@@ -298,6 +362,14 @@ export function migrate(db: Database.Database): void {
     db.exec(`ALTER TABLE transactions ADD COLUMN raw_name TEXT`);
   }
   db.exec(`UPDATE transactions SET raw_name = name WHERE raw_name IS NULL`);
+
+  // Migrate: add `enriched_name` to transactions for PayPal import. NULL
+  // by default — display code falls back to `name` when this is missing,
+  // so existing rows render exactly the same as before until they get
+  // matched against an imported PayPal record.
+  if (!txCols.some(c => c.name === "enriched_name")) {
+    db.exec(`ALTER TABLE transactions ADD COLUMN enriched_name TEXT`);
+  }
 
   // Migrate: rebuild recurring table to use Plaid stream schema
   const recCols = db.prepare(`PRAGMA table_info(recurring)`).all() as { name: string }[];

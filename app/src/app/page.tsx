@@ -2,10 +2,11 @@ import Link from "next/link";
 import { Calendar } from "lucide-react";
 import { getDb } from "@ray/db/connection";
 import { getUpcomingBills, type UpcomingBill } from "@ray/db/bills";
-import { markBillPaid, refreshData, updatePending } from "./actions";
+import { importPaypal, markBillPaid, refreshData, updatePending } from "./actions";
 import { MarkPaidButton } from "@/components/mark-paid-button";
 import { RefreshDataControl } from "@/components/refresh-data-control";
 import { UpdatePendingControl } from "@/components/update-pending-control";
+import { PaypalImportControl } from "@/components/paypal-import-control";
 
 export const dynamic = "force-dynamic";
 
@@ -96,6 +97,10 @@ export default function Home() {
             Manage bills
           </Link>
         </p>
+
+        <div className="mt-4">
+          <PaypalImportControl action={importPaypal} />
+        </div>
       </div>
     </main>
   );

@@ -15,6 +15,14 @@ import {
   type SupportedImageMimeType,
 } from "@ray/pending";
 import {
+  parsePaypalCsv,
+  importPaypalCsv,
+  matchPaypalToBank,
+  recategoriseEnrichedTransactions,
+  type PaypalImportSummary,
+} from "@ray/paypal";
+import { detectRecurring } from "@ray/csv-import/recurring-detector";
+import {
   forecastBalance,
   loadForecastSources,
   type ForecastResult,
@@ -24,6 +32,17 @@ import {
   sanitiseScenario,
   type Scenario,
 } from "@ray/forecast/scenario";
+import {
+  createGoal as createGoalRow,
+  updateGoal as updateGoalRow,
+  deleteGoal as deleteGoalRow,
+  archiveGoal as archiveGoalRow,
+  addContribution,
+  deleteContribution,
+  type GoalInput,
+  type GoalMode,
+  type GoalType,
+} from "@ray/goals";
 
 // ---------------------------------------------------------------------------
 // Types shared with the bill form
@@ -302,6 +321,76 @@ export async function updatePending(
 }
 
 // ---------------------------------------------------------------------------
+// PayPal CSV import
+// ---------------------------------------------------------------------------
+
+export type ImportPaypalResult =
+  | { ok: true; summary: PaypalImportSummary }
+  | { ok: false; error: string };
+
+/**
+ * Parse a PayPal "Completed Payments" CSV, replace the
+ * `paypal_transactions` table, match against bank rows, then re-run the
+ * recurring detector so newly-enriched subscriptions get clustered. Every
+ * step that touches user-facing data is revalidated at the end.
+ *
+ * Errors come back through the result object — the upload modal renders
+ * them in-place rather than throwing through Next's error boundary.
+ */
+export async function importPaypal(
+  formData: FormData,
+): Promise<ImportPaypalResult> {
+  const file = formData.get("file");
+  if (!(file instanceof File)) {
+    return { ok: false, error: "No file uploaded." };
+  }
+  if (!/\.csv$/i.test(file.name)) {
+    return {
+      ok: false,
+      error: `Expected a .csv file, got "${file.name}". Make sure you downloaded "Completed Payments" as CSV.`,
+    };
+  }
+
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const records = parsePaypalCsv(buffer);
+    if (records.length === 0) {
+      return {
+        ok: false,
+        error: "The CSV parsed cleanly but contained no payment rows.",
+      };
+    }
+
+    const totalImported = importPaypalCsv(records);
+    const { matched, ambiguous, unmatched } = matchPaypalToBank();
+    recategoriseEnrichedTransactions();
+    // Re-run the detector so PayPal-paid subscriptions get clustered now
+    // that their bank rows share a stable enriched name. Detector is
+    // cheap (scans the transactions table once) — worth doing inline so
+    // the result summary reflects the post-detection state.
+    detectRecurring();
+
+    revalidatePath("/");
+    revalidatePath("/forecast");
+    revalidatePath("/fortnight");
+    revalidatePath("/retrospective");
+
+    const summary: PaypalImportSummary = {
+      totalParsed: records.length,
+      totalImported,
+      matched,
+      ambiguous,
+      unmatched,
+    };
+    return { ok: true, summary };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: message };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Add / update / delete
 // ---------------------------------------------------------------------------
 
@@ -421,4 +510,237 @@ export async function deleteBill(id: number): Promise<void> {
   db.prepare(`DELETE FROM recurring_bills WHERE id = ?`).run(id);
   revalidateBillViews();
   redirect("/bills/manage");
+}
+
+// ---------------------------------------------------------------------------
+// Goals — form values, validation, and CRUD server actions
+// ---------------------------------------------------------------------------
+
+export type GoalFormValues = {
+  type: GoalType;
+  /**
+   * Savings sub-mode. Ignored (forced to 'balance') for cap types so the
+   * form can carry it around safely without per-type branching.
+   */
+  mode: GoalMode;
+  name: string;
+  /** Savings: target amount. Category cap: per-cycle cap. Sub cap: per-month cap. */
+  targetAmount: string;
+  /** Savings only. */
+  targetDate: string;
+  /** Savings only. */
+  accountId: string;
+  /** Category cap only. */
+  category: string;
+  /** Subscription cap only — array of composite "manual:<id>" / "stream:<id>" keys. */
+  includedBillIds: string[];
+};
+
+export type GoalFormState = {
+  errors?: Partial<Record<keyof GoalFormValues, string>>;
+  values?: GoalFormValues;
+};
+
+const GOAL_TYPES: GoalType[] = ["savings", "category-cap", "subscription-cap"];
+const CATEGORY_CAP_OPTIONS = [
+  "FOOD_AND_DRINK",
+  "MEDICAL",
+  "GENERAL_MERCHANDISE",
+  "ENTERTAINMENT",
+];
+
+function emptyGoalForm(): GoalFormValues {
+  return {
+    type: "savings",
+    mode: "balance",
+    name: "",
+    targetAmount: "",
+    targetDate: "",
+    accountId: "",
+    category: "",
+    includedBillIds: [],
+  };
+}
+
+function goalValuesFromFormData(formData: FormData): GoalFormValues {
+  const typeRaw = String(formData.get("type") ?? "savings");
+  const type: GoalType = (GOAL_TYPES as readonly string[]).includes(typeRaw)
+    ? (typeRaw as GoalType)
+    : "savings";
+  const modeRaw = String(formData.get("mode") ?? "balance");
+  const mode: GoalMode = modeRaw === "ledger" ? "ledger" : "balance";
+  return {
+    type,
+    mode,
+    name: String(formData.get("name") ?? "").trim(),
+    targetAmount: String(formData.get("targetAmount") ?? "").trim(),
+    targetDate: String(formData.get("targetDate") ?? "").trim(),
+    accountId: String(formData.get("accountId") ?? "").trim(),
+    category: String(formData.get("category") ?? "").trim(),
+    // Multi-select arrives as repeated form keys — `getAll` returns them all.
+    includedBillIds: formData.getAll("includedBillIds").map((v) => String(v)),
+  };
+}
+
+/**
+ * Validate per type. Returns either a clean `GoalInput` ready for DB write,
+ * or per-field error messages so the form can highlight individual inputs.
+ * Mirrors the bill-form pattern — server-side defence in depth even though
+ * the form does its own client-side checks.
+ */
+function validateGoal(
+  values: GoalFormValues,
+):
+  | { ok: true; data: GoalInput }
+  | { ok: false; errors: Partial<Record<keyof GoalFormValues, string>> } {
+  const errors: Partial<Record<keyof GoalFormValues, string>> = {};
+
+  if (!values.name) errors.name = "Name is required.";
+
+  const amount = Number.parseFloat(values.targetAmount);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    errors.targetAmount = "Target amount must be a positive number.";
+  }
+
+  const input: GoalInput = {
+    type: values.type,
+    // `mode` is only meaningful for savings — the module forces 'balance'
+    // for cap types but we pass it through verbatim so the validation round
+    // trip preserves the radio selection.
+    mode: values.type === "savings" ? values.mode : "balance",
+    name: values.name,
+    target_amount: Number.isFinite(amount) ? amount : 0,
+  };
+
+  if (values.type === "savings") {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(values.targetDate)) {
+      errors.targetDate = "Target date is required (YYYY-MM-DD).";
+    } else {
+      const parsed = new Date(values.targetDate + "T00:00:00Z");
+      if (isNaN(parsed.getTime())) {
+        errors.targetDate = "Target date is not a valid date.";
+      } else {
+        input.target_date = values.targetDate;
+      }
+    }
+    if (!values.accountId) {
+      errors.accountId = "Pick an account to track this goal against.";
+    } else {
+      input.account_id = values.accountId;
+    }
+  } else if (values.type === "category-cap") {
+    if (!values.category) {
+      errors.category = "Pick a category.";
+    } else if (!CATEGORY_CAP_OPTIONS.includes(values.category)) {
+      errors.category = "Unknown category.";
+    } else {
+      input.category = values.category;
+    }
+  } else if (values.type === "subscription-cap") {
+    if (values.includedBillIds.length === 0) {
+      errors.includedBillIds = "Select at least one subscription.";
+    } else {
+      input.included_bill_ids = values.includedBillIds;
+    }
+  }
+
+  if (Object.keys(errors).length > 0) {
+    return { ok: false, errors };
+  }
+  return { ok: true, data: input };
+}
+
+function revalidateGoalViews(): void {
+  revalidatePath("/goals");
+  revalidatePath("/balances");
+}
+
+export async function createGoalAction(
+  _prev: GoalFormState,
+  formData: FormData,
+): Promise<GoalFormState> {
+  const values = goalValuesFromFormData(formData);
+  const result = validateGoal(values);
+  if (!result.ok) return { errors: result.errors, values };
+  createGoalRow(result.data);
+  revalidateGoalViews();
+  redirect("/goals");
+}
+
+export async function updateGoalAction(
+  id: number,
+  _prev: GoalFormState,
+  formData: FormData,
+): Promise<GoalFormState> {
+  const values = goalValuesFromFormData(formData);
+  const result = validateGoal(values);
+  if (!result.ok) return { errors: result.errors, values };
+  updateGoalRow(id, result.data);
+  revalidateGoalViews();
+  redirect("/goals");
+}
+
+export async function deleteGoalAction(id: number): Promise<void> {
+  deleteGoalRow(id);
+  revalidateGoalViews();
+  redirect("/goals");
+}
+
+export async function archiveGoalAction(id: number): Promise<void> {
+  archiveGoalRow(id);
+  revalidateGoalViews();
+  redirect("/goals");
+}
+
+export { emptyGoalForm };
+
+// ---------------------------------------------------------------------------
+// Goal contributions — used by ledger-mode savings goals
+// ---------------------------------------------------------------------------
+
+export type AddContributionResult =
+  | { ok: true }
+  | { ok: false; error: string };
+
+/**
+ * Log a contribution against a ledger-mode goal. Validates amount > 0 and
+ * date in YYYY-MM-DD form before writing. Returns a discriminated union so
+ * the inline form can render the error in-place without throwing through
+ * Next's error boundary.
+ */
+export async function addGoalContribution(
+  goalId: number,
+  formData: FormData,
+): Promise<AddContributionResult> {
+  const amountRaw = String(formData.get("amount") ?? "").trim();
+  const dateRaw = String(formData.get("contributionDate") ?? "").trim();
+  const noteRaw = String(formData.get("note") ?? "").trim();
+
+  const amount = Number.parseFloat(amountRaw);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return { ok: false, error: "Amount must be a positive number." };
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateRaw)) {
+    return { ok: false, error: "Date is required (YYYY-MM-DD)." };
+  }
+  const parsedDate = new Date(dateRaw + "T00:00:00Z");
+  if (isNaN(parsedDate.getTime())) {
+    return { ok: false, error: "Date is not valid." };
+  }
+
+  try {
+    addContribution(goalId, amount, dateRaw, noteRaw || null);
+    revalidateGoalViews();
+    return { ok: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: message };
+  }
+}
+
+export async function deleteGoalContribution(
+  contributionId: number,
+): Promise<void> {
+  deleteContribution(contributionId);
+  revalidateGoalViews();
 }

@@ -242,6 +242,11 @@ function paceMoney(variance: number): string {
  */
 function loadBillsPaid(cycle: Cycle): number {
   const db = getDb();
+  // Match on the enriched name when available — `recurring.merchant_name`
+  // is now derived from the enriched value (the detector groups by
+  // `COALESCE(enriched_name, name)`), so a PayPal-paid subscription's
+  // bank descriptor ("Paypal Australia ###") would never satisfy the IN
+  // clause if we compared against `t.name` directly.
   const row = db
     .prepare(
       `SELECT COALESCE(SUM(t.amount), 0) AS total
@@ -249,7 +254,7 @@ function loadBillsPaid(cycle: Cycle): number {
         WHERE t.date BETWEEN ? AND ?
           AND t.amount > 0
           AND t.pending = 0
-          AND t.name IN (
+          AND COALESCE(t.enriched_name, t.name) IN (
             SELECT merchant_name FROM recurring
              WHERE is_active = 1
                AND stream_type = 'outflow'

@@ -49,9 +49,19 @@ export function detectRecurring(): RecurringDetectionResult {
   // Transfers between own accounts aren't recurring expenses, so they're
   // excluded. Same for pending rows — their dates are unstable.
   // -------------------------------------------------------------------------
+  // Prefer `enriched_name` for grouping when set — PayPal-paid subscriptions
+  // share an opaque bank descriptor ("Paypal Australia ###") but each row
+  // gets a distinct merchant name once enriched, so clustering on the
+  // enriched value lets the detector recognise them as one stream.
   const transactions = db
     .prepare(
-      `SELECT transaction_id, account_id, amount, date, name, category, subcategory
+      `SELECT transaction_id,
+              account_id,
+              amount,
+              date,
+              COALESCE(enriched_name, name) AS name,
+              category,
+              subcategory
          FROM transactions
         WHERE pending = 0
           AND (category IS NULL OR category NOT IN ('TRANSFER_OUT', 'TRANSFER_IN'))

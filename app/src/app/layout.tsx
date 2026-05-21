@@ -54,6 +54,12 @@ export default function RootLayout({
               What If?
             </Link>
             <Link
+              href="/goals"
+              className="font-medium text-neutral-700 hover:text-neutral-900"
+            >
+              Goals
+            </Link>
+            <Link
               href="/balances"
               className="font-medium text-neutral-700 hover:text-neutral-900"
             >

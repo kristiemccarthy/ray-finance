@@ -1,10 +1,17 @@
 // ---------------------------------------------------------------------------
 // Retrospective module.
 //
-// Builds month-over-month (or cycle-over-cycle) comparison data for the
-// `/retrospective` page. The two periods returned are always the two most
-// recently *completed* windows — today's own month/cycle is excluded so the
-// numbers don't shift around as the day progresses.
+// Builds N-period comparison data for the `/retrospective` page. Each
+// returned period is one of the most recently *completed* windows (today's
+// own month/cycle is excluded so the numbers don't shift around as the day
+// progresses).
+//
+// Each period carries its own totals AND a snapshot of the prior period's
+// per-category totals — so the page can render "X% vs the period before"
+// rows without a second pass. For the oldest visible period, `priorByCategory`
+// is filled by an extra (hidden) period that was loaded internally; if
+// history doesn't extend that far back, it's null and the page renders
+// dollar amounts with no percentage.
 // ---------------------------------------------------------------------------
 
 import { getDb } from "../db/connection.js";
@@ -38,7 +45,7 @@ export interface TopTransaction {
   date: string;
 }
 
-export interface PeriodTotals {
+export interface PeriodSummary {
   window: PeriodWindow;
   /** Absolute dollars of incoming money (sign of source rows is negative). */
   incomeTotal: number;
@@ -46,21 +53,27 @@ export interface PeriodTotals {
   outflowTotal: number;
   /** incomeTotal − outflowTotal. Positive = surplus. */
   net: number;
-  /** Per-category outflow totals keyed by `RetrospectiveCategoryKey`. */
+  /** Per-category outflow totals. */
   byCategory: Record<RetrospectiveCategoryKey, number>;
+  /**
+   * Per-category totals for the period immediately before this one. `null`
+   * for the oldest visible period when we have no history to compare
+   * against — the page renders dollar amounts only in that case.
+   */
+  priorByCategory: Record<RetrospectiveCategoryKey, number> | null;
   /** Largest three outflows, descending. */
   topTransactions: TopTransaction[];
+  /** True when at least one non-pending transaction landed in this window. */
+  hasData: boolean;
 }
 
 export interface RetrospectiveData {
   view: RetrospectiveView;
-  /** Most recent completed period. */
-  recent: PeriodTotals | null;
-  /** Period before `recent`. */
-  comparison: PeriodTotals | null;
+  /** Most recent first. May be shorter than `count` when history is shallow. */
+  periods: PeriodSummary[];
   /**
-   * True when we have less than two completed periods of data. The page
-   * uses this to render the "Not enough history yet" empty state.
+   * True when we couldn't build even one period with real activity. The page
+   * uses this for the "Not enough history yet" empty state.
    */
   notEnoughHistory: boolean;
 }
@@ -117,27 +130,27 @@ function cycleWindow(start: Date): PeriodWindow {
 }
 
 /**
- * Returns the two most recently completed calendar-month windows.
- * "Completed" excludes the current month, so on May 17 we return
- * [April, March].
+ * Most recent N completed calendar months. Position 0 = previous month
+ * (today's month is excluded — it's still in progress). On May 18 with
+ * N=5, returns [Apr, Mar, Feb, Jan, Dec].
  */
-function getCompletedMonths(today: Date): [PeriodWindow, PeriodWindow] {
-  const y = today.getUTCFullYear();
-  const m = today.getUTCMonth();
-  const recentDate = new Date(Date.UTC(y, m - 1, 1));
-  const compareDate = new Date(Date.UTC(y, m - 2, 1));
-  return [
-    calendarMonthWindow(recentDate.getUTCFullYear(), recentDate.getUTCMonth()),
-    calendarMonthWindow(compareDate.getUTCFullYear(), compareDate.getUTCMonth()),
-  ];
+function getCompletedMonths(today: Date, count: number): PeriodWindow[] {
+  const result: PeriodWindow[] = [];
+  for (let i = 0; i < count; i++) {
+    const d = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - 1 - i, 1));
+    result.push(calendarMonthWindow(d.getUTCFullYear(), d.getUTCMonth()));
+  }
+  return result;
 }
 
 /**
- * Returns the two most recently *completed* pay cycles. Anchored to the
- * latest fortnightly salary inflow on file (same logic as /fortnight). The
- * cycle containing `today` is in-progress and is excluded.
+ * Most recent N completed pay cycles, anchored to the latest fortnightly
+ * salary inflow on file. The cycle containing `today` is in-progress and
+ * is skipped — position 0 is the one that ended right before today.
+ * Returns null when no anchor is available AND the dow-fallback can't
+ * place a starting cycle (effectively never — fallback always succeeds).
  */
-function getCompletedCycles(today: Date): [PeriodWindow, PeriodWindow] | null {
+function getCompletedCycles(today: Date, count: number): PeriodWindow[] {
   const db = getDb();
   const salaryRow = db
     .prepare(
@@ -165,14 +178,14 @@ function getCompletedCycles(today: Date): [PeriodWindow, PeriodWindow] | null {
     currentCycleStart = new Date(today.getTime() - daysBack * MS_PER_DAY);
   }
 
-  const recentStart = new Date(
-    currentCycleStart.getTime() - CYCLE_LENGTH_DAYS * MS_PER_DAY,
-  );
-  const compareStart = new Date(
-    currentCycleStart.getTime() - 2 * CYCLE_LENGTH_DAYS * MS_PER_DAY,
-  );
-
-  return [cycleWindow(recentStart), cycleWindow(compareStart)];
+  const result: PeriodWindow[] = [];
+  for (let i = 1; i <= count; i++) {
+    const start = new Date(
+      currentCycleStart.getTime() - i * CYCLE_LENGTH_DAYS * MS_PER_DAY,
+    );
+    result.push(cycleWindow(start));
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -197,14 +210,6 @@ const EMPTY_BY_CATEGORY: Record<RetrospectiveCategoryKey, number> = {
   OTHER: 0,
 };
 
-/**
- * Names that should be classified as Bills regardless of Plaid category.
- * Comprises:
- *   - Active recurring outflow stream merchants (Plaid-detected subscriptions)
- *   - Manual recurring_bills entries (user-defined fixed costs)
- *
- * Comparison is case-insensitive against `transactions.name`.
- */
 function loadBillNames(): Set<string> {
   const db = getDb();
   const recurring = db
@@ -231,7 +236,7 @@ function bucketize(
   category: string | null,
   name: string,
   billNames: Set<string>,
-): RetrospectiveCategoryKey | null {
+): RetrospectiveCategoryKey {
   // Bills take priority — a recurring grocery subscription should land in
   // Bills, not Food & Drink, so the discretionary categories actually
   // measure discretionary spending.
@@ -261,17 +266,30 @@ interface TxRow {
   category: string | null;
 }
 
-function loadPeriodTotals(
+interface RawPeriod {
+  window: PeriodWindow;
+  incomeTotal: number;
+  outflowTotal: number;
+  net: number;
+  byCategory: Record<RetrospectiveCategoryKey, number>;
+  topTransactions: TopTransaction[];
+  hasData: boolean;
+}
+
+function loadRawPeriod(
   window: PeriodWindow,
   billNames: Set<string>,
-): PeriodTotals {
+): RawPeriod {
   const db = getDb();
 
   // Outflows: amount > 0, excluding internal transfers and loan principal
   // (loans are accounted in the balance sheet, not the spending view).
+  // `enriched_name` (from the PayPal CSV import) wins over the raw bank
+  // descriptor whenever it's been set — so "Paypal Australia 105036…"
+  // surfaces as "Spotify" / "ChatGPT" / etc. in the top-3 list.
   const outflowRows = db
     .prepare(
-      `SELECT name, amount, date, category
+      `SELECT COALESCE(enriched_name, name) AS name, amount, date, category
          FROM transactions
         WHERE date BETWEEN ? AND ?
           AND amount > 0
@@ -284,14 +302,14 @@ function loadPeriodTotals(
   // Income: amount < 0, excluding TRANSFER_IN (incoming internal movement).
   const incomeRow = db
     .prepare(
-      `SELECT COALESCE(SUM(amount), 0) AS total
+      `SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count
          FROM transactions
         WHERE date BETWEEN ? AND ?
           AND amount < 0
           AND pending = 0
           AND (category IS NULL OR category != 'TRANSFER_IN')`,
     )
-    .get(window.startDate, window.endDate) as { total: number };
+    .get(window.startDate, window.endDate) as { total: number; count: number };
 
   const incomeTotal = Math.abs(incomeRow.total);
 
@@ -301,16 +319,15 @@ function loadPeriodTotals(
   let outflowTotal = 0;
   for (const row of outflowRows) {
     const bucket = bucketize(row.category, row.name, billNames);
-    if (!bucket) continue;
     byCategory[bucket] += row.amount;
     outflowTotal += row.amount;
   }
 
-  // Top 3 by amount — `outflowRows` is already sorted DESC and excludes
-  // transfers, so the first three are exactly what we want.
   const topTransactions: TopTransaction[] = outflowRows
     .slice(0, 3)
     .map((r) => ({ name: r.name, amount: r.amount, date: r.date }));
+
+  const hasData = outflowRows.length > 0 || incomeRow.count > 0;
 
   return {
     window,
@@ -319,68 +336,70 @@ function loadPeriodTotals(
     net: incomeTotal - outflowTotal,
     byCategory,
     topTransactions,
+    hasData,
   };
-}
-
-/**
- * Returns true if the period has any non-pending transaction activity at all
- * — used to decide "Not enough history yet" without misclassifying a
- * just-quiet month as missing data.
- */
-function periodHasAnyData(window: PeriodWindow): boolean {
-  const db = getDb();
-  const row = db
-    .prepare(
-      `SELECT COUNT(*) AS count
-         FROM transactions
-        WHERE date BETWEEN ? AND ?
-          AND pending = 0`,
-    )
-    .get(window.startDate, window.endDate) as { count: number };
-  return row.count > 0;
 }
 
 // ---------------------------------------------------------------------------
 // Public entry
 // ---------------------------------------------------------------------------
 
+export const DEFAULT_PERIOD_COUNT = 5;
+export const ALLOWED_PERIOD_COUNTS = [3, 5, 12] as const;
+
 export function getRetrospective(
   view: RetrospectiveView,
+  count: number = DEFAULT_PERIOD_COUNT,
   now: Date = new Date(),
 ): RetrospectiveData {
   const today = startOfUtcDay(now);
 
-  let recentWindow: PeriodWindow | null = null;
-  let compareWindow: PeriodWindow | null = null;
+  // Pull one extra window so the oldest visible period has a prior-period
+  // snapshot to compare against. The +1 is only consumed for its
+  // `byCategory` — never rendered itself.
+  const candidateWindows =
+    view === "calendar"
+      ? getCompletedMonths(today, count + 1)
+      : getCompletedCycles(today, count + 1);
 
-  if (view === "calendar") {
-    const [r, c] = getCompletedMonths(today);
-    recentWindow = r;
-    compareWindow = c;
-  } else {
-    const cycles = getCompletedCycles(today);
-    if (cycles) {
-      recentWindow = cycles[0];
-      compareWindow = cycles[1];
-    }
-  }
-
-  if (!recentWindow || !compareWindow) {
-    return { view, recent: null, comparison: null, notEnoughHistory: true };
-  }
-
-  // "Not enough history" means the older of the two periods has zero
-  // transactions on file. Empty recent window with data in the older one
-  // is still a valid (albeit quiet) comparison.
-  if (!periodHasAnyData(compareWindow)) {
-    return { view, recent: null, comparison: null, notEnoughHistory: true };
+  if (candidateWindows.length === 0) {
+    return { view, periods: [], notEnoughHistory: true };
   }
 
   const billNames = loadBillNames();
-  const recent = loadPeriodTotals(recentWindow, billNames);
-  const comparison = loadPeriodTotals(compareWindow, billNames);
+  const rawPeriods = candidateWindows.map((w) => loadRawPeriod(w, billNames));
 
-  return { view, recent, comparison, notEnoughHistory: false };
+  // Visible periods are the first `count` of the raw set.
+  const visible = rawPeriods.slice(0, count);
+  const hidden = rawPeriods[count]; // undefined when history shallower than N+1.
+
+  // "Not enough history" only trips when no visible period has any
+  // activity at all. A single sparse period is still worth showing.
+  if (!visible.some((p) => p.hasData)) {
+    return { view, periods: [], notEnoughHistory: true };
+  }
+
+  const periods: PeriodSummary[] = visible.map((p, i) => {
+    // Prior = the next *raw* period (which is older, since they're sorted
+    // most-recent-first). For periods[N-1] this falls through to the
+    // hidden N+1th — null when we didn't manage to load one with real
+    // history beyond the visible window.
+    const next: RawPeriod | undefined = visible[i + 1] ?? hidden;
+    const priorByCategory =
+      next && next.hasData ? next.byCategory : null;
+    return {
+      window: p.window,
+      incomeTotal: p.incomeTotal,
+      outflowTotal: p.outflowTotal,
+      net: p.net,
+      byCategory: p.byCategory,
+      priorByCategory,
+      topTransactions: p.topTransactions,
+      hasData: p.hasData,
+    };
+  });
+
+  return { view, periods, notEnoughHistory: false };
 }
 
 // Re-exported so the page can iterate in the spec'd order without
