@@ -9,9 +9,11 @@
 
 import { createHash } from "node:crypto";
 import {
-  categoriseFromDescription,
+  categoriseWithRules,
   DEFAULT_CATEGORY,
-} from "../basiq/categories.js";
+  inferFlowType,
+  type CategoryOverride,
+} from "./categoriser.js";
 import type {
   AccountRow,
   InstitutionRow,
@@ -170,12 +172,32 @@ export function mapTransactionRowFromImported(
   row: ImportedRow,
   accountId: string,
   currency: string,
+  /**
+   * User-defined override rules. The caller (`importer.ts`) loads these
+   * once per import and passes them through so the per-row hot path
+   * doesn't re-query.
+   */
+  rules: CategoryOverride[] = [],
 ): TransactionRow {
-  const matched = categoriseFromDescription(row.description) ?? DEFAULT_CATEGORY;
-  let category = matched.category;
-  if (category === "TRANSFER_OUT" && row.amount < 0) {
-    category = "TRANSFER_IN";
-  }
+  // Pass both the alias-applied description (post `DESCRIPTION_ALIASES`
+  // in the parser) and the raw bank descriptor through to the categoriser
+  // so override rules can match against either form — see the comment
+  // block on `categoriseWithRules` for why.
+  //
+  // The categoriser now also handles the sign-flip internally (TRANSFER_OUT
+  // with amount < 0 → TRANSFER_IN), so we don't need to repeat the
+  // post-process flip the original mapper had. flowType comes back
+  // already inferred from the final category.
+  const matched = categoriseWithRules(
+    row.description,
+    row.raw_description,
+    rules,
+    row.amount,
+  );
+  const category = matched?.category ?? DEFAULT_CATEGORY.category;
+  const subcategory = matched?.subcategory ?? DEFAULT_CATEGORY.subcategory;
+  const flowType =
+    matched?.flowType ?? inferFlowType(category, row.amount);
 
   return {
     transaction_id: deriveTransactionId(accountId, row),
@@ -188,7 +210,7 @@ export function mapTransactionRowFromImported(
     raw_name: row.raw_description,
     merchant_name: null,
     category,
-    subcategory: matched.subcategory,
+    subcategory,
     pending: 0,
     iso_currency_code: currency,
     payment_channel: "other",
@@ -196,6 +218,9 @@ export function mapTransactionRowFromImported(
     website: null,
     label: null,
     note: null,
+    flow_type: flowType,
+    manual_category: 0,
+    manual_flow_type: 0,
   };
 }
 

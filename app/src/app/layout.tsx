@@ -65,6 +65,12 @@ export default function RootLayout({
             >
               Balances
             </Link>
+            <Link
+              href="/settings"
+              className="font-medium text-neutral-700 hover:text-neutral-900"
+            >
+              Settings
+            </Link>
           </div>
         </nav>
         {children}

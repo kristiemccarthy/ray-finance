@@ -1,4 +1,10 @@
 import type Database from "libsql";
+// `recategoriseAllTransactions` is imported eagerly here — schema.ts is
+// loaded from connection.ts, and recategorise.ts also re-imports
+// connection.ts. ESM handles the cycle because nothing at module top
+// level dereferences the cyclic bindings; the actual `getDb` call inside
+// recategorise is bypassed by passing our own `db` instance through.
+import { recategoriseAllTransactions } from "../csv-import/recategorise.js";
 
 export function migrate(db: Database.Database): void {
   db.exec(`
@@ -210,6 +216,19 @@ export function migrate(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_paypal_date_amount
       ON paypal_transactions(date, gross);
 
+    CREATE TABLE IF NOT EXISTS category_overrides (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      match_pattern TEXT NOT NULL,
+      category TEXT NOT NULL,
+      subcategory TEXT,
+      note TEXT,
+      flow_type TEXT,
+      set_category INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (date('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_category_overrides_pattern
+      ON category_overrides(match_pattern);
+
     CREATE TABLE IF NOT EXISTS milestones (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -371,6 +390,35 @@ export function migrate(db: Database.Database): void {
     db.exec(`ALTER TABLE transactions ADD COLUMN enriched_name TEXT`);
   }
 
+  // Migrate: add flow_type + manual-override flags to transactions. NULL
+  // flow_type means "not yet inferred" — the one-shot seed below
+  // backfills these from the existing category column. The two manual
+  // flags default to 0; the transaction inspector flips them to 1 when
+  // the user pins a value so the recategoriser can't clobber it.
+  const txCols2 = db.prepare(`PRAGMA table_info(transactions)`).all() as { name: string }[];
+  if (!txCols2.some(c => c.name === "flow_type")) {
+    db.exec(`ALTER TABLE transactions ADD COLUMN flow_type TEXT`);
+  }
+  if (!txCols2.some(c => c.name === "manual_category")) {
+    db.exec(`ALTER TABLE transactions ADD COLUMN manual_category INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!txCols2.some(c => c.name === "manual_flow_type")) {
+    db.exec(`ALTER TABLE transactions ADD COLUMN manual_flow_type INTEGER NOT NULL DEFAULT 0`);
+  }
+
+  // Migrate: extend category_overrides so rules can carry flow_type and
+  // optionally skip the category write (e.g. a rule that only marks
+  // certain descriptors as INTERNAL_TRANSFER without changing their
+  // category). `set_category` defaults to 1 for existing rules — their
+  // current semantics are preserved.
+  const overrideCols = db.prepare(`PRAGMA table_info(category_overrides)`).all() as { name: string }[];
+  if (!overrideCols.some(c => c.name === "flow_type")) {
+    db.exec(`ALTER TABLE category_overrides ADD COLUMN flow_type TEXT`);
+  }
+  if (!overrideCols.some(c => c.name === "set_category")) {
+    db.exec(`ALTER TABLE category_overrides ADD COLUMN set_category INTEGER NOT NULL DEFAULT 1`);
+  }
+
   // Migrate: rebuild recurring table to use Plaid stream schema
   const recCols = db.prepare(`PRAGMA table_info(recurring)`).all() as { name: string }[];
   if (!recCols.some(c => c.name === "stream_id")) {
@@ -395,4 +443,231 @@ export function migrate(db: Database.Database): void {
       )
     `);
   }
+
+  seedCategoryOverrides(db);
+  seedPetCareRules(db);
+  seedExistingFlowTypes(db);
+  seedFlowTypeRules(db);
+}
+
+// ---------------------------------------------------------------------------
+// One-shot seed for category_overrides.
+//
+// Inserts well-known merchant rules (liquor stores → ALCOHOL, plus the
+// medical providers we've explicitly identified) the first time this DB
+// is migrated against the v1 seed list. A marker row in `settings` gates
+// the seed so:
+//   - re-running migrate() is a no-op (marker present)
+//   - deleting a seeded rule sticks (marker present, no re-insert)
+//   - the user can still edit a seeded rule's category without it being
+//     reverted on next start
+//
+// Belt-and-suspenders: even with the marker missing (e.g. fresh DB), the
+// loop skips any pattern that already exists, so concurrent first-runs
+// or a manually-pre-populated table can't produce duplicates.
+// ---------------------------------------------------------------------------
+function seedCategoryOverrides(db: Database.Database): void {
+  const MARKER_KEY = "seeded_category_overrides_v1";
+  const marker = db
+    .prepare(`SELECT value FROM settings WHERE key = ?`)
+    .get(MARKER_KEY);
+  if (marker) return;
+
+  interface SeedRule {
+    pattern: string;
+    category: string;
+    note: string;
+  }
+  const SEED: SeedRule[] = [
+    { pattern: "DAN MURPHY", category: "ALCOHOL", note: "Liquor retailer" },
+    { pattern: "BWS", category: "ALCOHOL", note: "Liquor retailer" },
+    { pattern: "LIQUORLAND", category: "ALCOHOL", note: "Liquor retailer" },
+    { pattern: "FIRST CHOICE LIQUOR", category: "ALCOHOL", note: "Liquor retailer" },
+    { pattern: "CELLARBRATIONS", category: "ALCOHOL", note: "Liquor retailer" },
+    { pattern: "VINTAGE CELLARS", category: "ALCOHOL", note: "Liquor retailer" },
+    { pattern: "MOVE360", category: "MEDICAL", note: "Laura's psychiatrist" },
+    { pattern: "SWIFT EMERGENCY", category: "MEDICAL", note: "Vet emergency clinic" },
+  ];
+
+  const checkExists = db.prepare(
+    `SELECT 1 FROM category_overrides WHERE match_pattern = ? LIMIT 1`,
+  );
+  const insert = db.prepare(
+    `INSERT INTO category_overrides (match_pattern, category, subcategory, note)
+     VALUES (?, ?, NULL, ?)`,
+  );
+  const setMarker = db.prepare(
+    `INSERT OR REPLACE INTO settings (key, value) VALUES (?, date('now'))`,
+  );
+
+  const tx = db.transaction(() => {
+    for (const s of SEED) {
+      if (checkExists.get(s.pattern)) continue;
+      insert.run(s.pattern, s.category, s.note);
+    }
+    setMarker.run(MARKER_KEY);
+  });
+  tx();
+}
+
+// ---------------------------------------------------------------------------
+// One-shot seed for the PET_CARE category.
+//
+// Independent of `seedCategoryOverrides` — uses its own marker key so the
+// alcohol/move360 seed's marker doesn't gate this one, and vice versa.
+//
+// Currently a single rule:
+//   - PETSTOCK → PET_CARE         (inserted if no rule for the pattern
+//                                  already exists)
+//
+// SWIFT EMERGENCY is intentionally *not* touched here. Despite the name,
+// it's a human private emergency department, not a vet clinic — so it
+// belongs in MEDICAL and stays managed by `seedCategoryOverrides`.
+//
+// After the rule writes complete, we run `recategoriseAllTransactions`
+// against the same `db` so existing Petstock rows pick up PET_CARE
+// immediately. Passing `db` directly side-steps the circular-import
+// cycle (schema → recategorise → connection → schema) that would
+// otherwise route through `getDb()` and recurse.
+// ---------------------------------------------------------------------------
+function seedPetCareRules(db: Database.Database): void {
+  const MARKER_KEY = "seeded_pet_care_rules_v1";
+  const marker = db
+    .prepare(`SELECT value FROM settings WHERE key = ?`)
+    .get(MARKER_KEY);
+  if (marker) return;
+
+  const existsByPattern = db.prepare(
+    `SELECT id FROM category_overrides WHERE match_pattern = ? LIMIT 1`,
+  );
+  const insertRule = db.prepare(
+    `INSERT INTO category_overrides (match_pattern, category, subcategory, note)
+     VALUES (?, ?, NULL, ?)`,
+  );
+  const setMarker = db.prepare(
+    `INSERT OR REPLACE INTO settings (key, value) VALUES (?, date('now'))`,
+  );
+
+  const tx = db.transaction(() => {
+    if (!existsByPattern.get("PETSTOCK")) {
+      insertRule.run("PETSTOCK", "PET_CARE", "Pet supplies retailer");
+    }
+    setMarker.run(MARKER_KEY);
+  });
+  tx();
+
+  // Outside the rule-write transaction so the recategorise pass sees the
+  // freshly-written rule. `recategoriseAllTransactions` runs its own
+  // transaction internally.
+  recategoriseAllTransactions(db);
+}
+
+// ---------------------------------------------------------------------------
+// One-shot backfill of `flow_type` for existing rows.
+//
+// Maps:
+//   INCOME                       → EARNED_INCOME
+//   TRANSFER_IN / TRANSFER_OUT   → INTERNAL_TRANSFER
+//   LOAN_PAYMENTS                → REPAYMENT
+//   everything else              → SPENDING
+//
+// Only runs once (gated by a settings marker). After this seed, the
+// flow-type rule seed below + `recategoriseAllTransactions` refine
+// further via rules.
+// ---------------------------------------------------------------------------
+function seedExistingFlowTypes(db: Database.Database): void {
+  const MARKER_KEY = "seeded_flow_types_v1";
+  const marker = db
+    .prepare(`SELECT value FROM settings WHERE key = ?`)
+    .get(MARKER_KEY);
+  if (marker) return;
+
+  const setMarker = db.prepare(
+    `INSERT OR REPLACE INTO settings (key, value) VALUES (?, date('now'))`,
+  );
+
+  const tx = db.transaction(() => {
+    db.exec(`
+      UPDATE transactions
+         SET flow_type = CASE
+           WHEN category = 'INCOME' THEN 'EARNED_INCOME'
+           WHEN category = 'TRANSFER_IN' OR category = 'TRANSFER_OUT' THEN 'INTERNAL_TRANSFER'
+           WHEN category = 'LOAN_PAYMENTS' THEN 'REPAYMENT'
+           ELSE 'SPENDING'
+         END
+       WHERE flow_type IS NULL
+    `);
+    setMarker.run(MARKER_KEY);
+  });
+  tx();
+}
+
+// ---------------------------------------------------------------------------
+// Seed default rules that match common internal-transfer descriptors and
+// set flow_type only (set_category=0 — they don't touch the rule's
+// category column, which is intentionally left as a generic "OTHER"
+// placeholder).
+//
+// Why this exists: bank descriptors for internal transfers ("Internet
+// Deposit From <account-number>") don't pattern-match cleanly via the
+// PFC layer, and the import-time sign-flip can drift back to TRANSFER_OUT
+// during recategorisation. Pinning these rows to INTERNAL_TRANSFER at the
+// flow-type level keeps them out of the retrospective's income/outflow
+// totals regardless of which side of the transfer they represent.
+// ---------------------------------------------------------------------------
+function seedFlowTypeRules(db: Database.Database): void {
+  const MARKER_KEY = "seeded_flow_type_rules_v1";
+  const marker = db
+    .prepare(`SELECT value FROM settings WHERE key = ?`)
+    .get(MARKER_KEY);
+  if (marker) return;
+
+  const existsByPattern = db.prepare(
+    `SELECT id FROM category_overrides WHERE match_pattern = ? LIMIT 1`,
+  );
+  // set_category = 0: rule only sets flow_type. category column carries
+  // a placeholder ('OTHER') because the schema requires NOT NULL — but
+  // the categoriser will ignore it when set_category=0.
+  const insertFlowOnlyRule = db.prepare(
+    `INSERT INTO category_overrides
+       (match_pattern, category, subcategory, note, flow_type, set_category)
+     VALUES (?, 'OTHER', NULL, ?, ?, 0)`,
+  );
+  const setMarker = db.prepare(
+    `INSERT OR REPLACE INTO settings (key, value) VALUES (?, date('now'))`,
+  );
+
+  interface SeedRule {
+    pattern: string;
+    flowType: string;
+    note: string;
+  }
+  const SEED: SeedRule[] = [
+    {
+      pattern: "INTERNET DEPOSIT FROM",
+      flowType: "INTERNAL_TRANSFER",
+      note: "Internal transfer between own accounts",
+    },
+    {
+      pattern: "TRANSFER FROM OWN ACCOUNT",
+      flowType: "INTERNAL_TRANSFER",
+      note: "Internal transfer (incoming side)",
+    },
+    {
+      pattern: "TRANSFER TO OWN ACCOUNT",
+      flowType: "INTERNAL_TRANSFER",
+      note: "Internal transfer (outgoing side)",
+    },
+  ];
+
+  const tx = db.transaction(() => {
+    for (const s of SEED) {
+      if (existsByPattern.get(s.pattern)) continue;
+      insertFlowOnlyRule.run(s.pattern, s.note, s.flowType);
+    }
+    setMarker.run(MARKER_KEY);
+  });
+  tx();
+
+  recategoriseAllTransactions(db);
 }

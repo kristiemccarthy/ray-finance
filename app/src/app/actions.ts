@@ -23,6 +23,16 @@ import {
 } from "@ray/paypal";
 import { detectRecurring } from "@ray/csv-import/recurring-detector";
 import {
+  recategoriseAllTransactions,
+  recategoriseTransaction,
+} from "@ray/csv-import/recategorise";
+// Sync constants (and derived value-sets) live in a plain-TS module —
+// "use server" files can only export async actions, not constants.
+import {
+  VALID_CATEGORY_VALUES,
+  VALID_FLOW_TYPES,
+} from "./settings/categories/form-values";
+import {
   forecastBalance,
   loadForecastSources,
   type ForecastResult,
@@ -547,20 +557,9 @@ const CATEGORY_CAP_OPTIONS = [
   "MEDICAL",
   "GENERAL_MERCHANDISE",
   "ENTERTAINMENT",
+  "ALCOHOL",
+  "PET_CARE",
 ];
-
-function emptyGoalForm(): GoalFormValues {
-  return {
-    type: "savings",
-    mode: "balance",
-    name: "",
-    targetAmount: "",
-    targetDate: "",
-    accountId: "",
-    category: "",
-    includedBillIds: [],
-  };
-}
 
 function goalValuesFromFormData(formData: FormData): GoalFormValues {
   const typeRaw = String(formData.get("type") ?? "savings");
@@ -692,7 +691,6 @@ export async function archiveGoalAction(id: number): Promise<void> {
   redirect("/goals");
 }
 
-export { emptyGoalForm };
 
 // ---------------------------------------------------------------------------
 // Goal contributions — used by ledger-mode savings goals
@@ -743,4 +741,310 @@ export async function deleteGoalContribution(
 ): Promise<void> {
   deleteContribution(contributionId);
   revalidateGoalViews();
+}
+
+// ---------------------------------------------------------------------------
+// Category rules — CRUD + bulk recategorise
+// ---------------------------------------------------------------------------
+
+export type CategoryRuleFormValues = {
+  pattern: string;
+  /** Empty string when `setCategory` is false (UI hides the dropdown). */
+  category: string;
+  subcategory: string;
+  note: string;
+  /**
+   * Empty string means "inherit from category" — the rule won't pin
+   * flow_type, and the row's flow_type stays inferred from its category.
+   */
+  flowType: string;
+  /** "1" when the rule sets category; "0" when it sets only flow_type. */
+  setCategory: string;
+};
+
+export type CategoryRuleFormState = {
+  errors?: Partial<Record<keyof CategoryRuleFormValues, string>>;
+  values?: CategoryRuleFormValues;
+};
+
+function categoryRuleValuesFromFormData(
+  formData: FormData,
+): CategoryRuleFormValues {
+  return {
+    pattern: String(formData.get("pattern") ?? "").trim(),
+    category: String(formData.get("category") ?? "").trim(),
+    subcategory: String(formData.get("subcategory") ?? "").trim(),
+    note: String(formData.get("note") ?? "").trim(),
+    flowType: String(formData.get("flowType") ?? "").trim(),
+    // The checkbox sends "1" when checked, nothing when unchecked. The
+    // form also renders a hidden "0" companion so the absent case is
+    // distinguishable from a stale browser default.
+    setCategory: String(formData.get("setCategory") ?? "1").trim(),
+  };
+}
+
+function validateCategoryRule(values: CategoryRuleFormValues):
+  | {
+      ok: true;
+      data: {
+        pattern: string;
+        category: string;
+        subcategory: string | null;
+        note: string | null;
+        flowType: string | null;
+        setCategory: number;
+      };
+    }
+  | { ok: false; errors: Partial<Record<keyof CategoryRuleFormValues, string>> } {
+  const errors: Partial<Record<keyof CategoryRuleFormValues, string>> = {};
+  if (!values.pattern) errors.pattern = "Pattern is required.";
+
+  const setCategory = values.setCategory === "1" ? 1 : 0;
+
+  // Category only validated when the rule actually sets it. When
+  // setCategory=0, the form may submit an empty category — the rule
+  // becomes flow-type-only.
+  if (setCategory === 1) {
+    if (!values.category) {
+      errors.category = "Pick a category, or uncheck 'Set category'.";
+    } else if (!VALID_CATEGORY_VALUES.has(values.category)) {
+      errors.category = "Unknown category.";
+    }
+  }
+
+  // Flow-type-only rules need a flow type. Category-only rules can leave
+  // it blank.
+  if (setCategory === 0 && !values.flowType) {
+    errors.flowType = "Pick a flow type, or check 'Set category' to write a category.";
+  }
+  if (values.flowType && !VALID_FLOW_TYPES.has(values.flowType)) {
+    errors.flowType = "Unknown flow type.";
+  }
+
+  if (Object.keys(errors).length > 0) return { ok: false, errors };
+
+  // The DB column is NOT NULL on `category`, so flow-type-only rules
+  // park 'OTHER' as a benign placeholder. The categoriser ignores this
+  // column when set_category=0.
+  const persistedCategory =
+    setCategory === 1 ? values.category : "OTHER";
+
+  return {
+    ok: true,
+    data: {
+      pattern: values.pattern,
+      category: persistedCategory,
+      subcategory: setCategory === 1 ? values.subcategory || null : null,
+      note: values.note || null,
+      flowType: values.flowType || null,
+      setCategory,
+    },
+  };
+}
+
+/**
+ * Touch every view that surfaces categorised data, so the bulk
+ * re-categorise that follows each rule write is reflected in the UI on
+ * the very next navigation.
+ */
+function revalidateCategoryViews(): void {
+  revalidatePath("/");
+  revalidatePath("/forecast");
+  revalidatePath("/fortnight");
+  revalidatePath("/retrospective");
+  revalidatePath("/what-if");
+  revalidatePath("/goals");
+  revalidatePath("/settings/categories");
+}
+
+export async function addCategoryRule(
+  _prev: CategoryRuleFormState,
+  formData: FormData,
+): Promise<CategoryRuleFormState> {
+  const values = categoryRuleValuesFromFormData(formData);
+  const result = validateCategoryRule(values);
+  if (!result.ok) return { errors: result.errors, values };
+
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO category_overrides
+       (match_pattern, category, subcategory, note, flow_type, set_category)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    result.data.pattern,
+    result.data.category,
+    result.data.subcategory,
+    result.data.note,
+    result.data.flowType,
+    result.data.setCategory,
+  );
+
+  // Apply the rule to existing rows immediately so the user sees the
+  // effect rather than having to wait for the next import. Cheap — single
+  // SELECT + per-row UPDATE inside one transaction.
+  recategoriseAllTransactions();
+  revalidateCategoryViews();
+  redirect("/settings/categories");
+}
+
+export async function updateCategoryRule(
+  id: number,
+  _prev: CategoryRuleFormState,
+  formData: FormData,
+): Promise<CategoryRuleFormState> {
+  const values = categoryRuleValuesFromFormData(formData);
+  const result = validateCategoryRule(values);
+  if (!result.ok) return { errors: result.errors, values };
+
+  const db = getDb();
+  db.prepare(
+    `UPDATE category_overrides
+        SET match_pattern = ?,
+            category = ?,
+            subcategory = ?,
+            note = ?,
+            flow_type = ?,
+            set_category = ?
+      WHERE id = ?`,
+  ).run(
+    result.data.pattern,
+    result.data.category,
+    result.data.subcategory,
+    result.data.note,
+    result.data.flowType,
+    result.data.setCategory,
+    id,
+  );
+
+  recategoriseAllTransactions();
+  revalidateCategoryViews();
+  redirect("/settings/categories");
+}
+
+export async function deleteCategoryRule(id: number): Promise<void> {
+  const db = getDb();
+  db.prepare(`DELETE FROM category_overrides WHERE id = ?`).run(id);
+  recategoriseAllTransactions();
+  revalidateCategoryViews();
+  redirect("/settings/categories");
+}
+
+export type RecategoriseResultPayload =
+  | { ok: true; scanned: number; changed: number }
+  | { ok: false; error: string };
+
+/**
+ * Re-run the categoriser over every row in `transactions`. Wraps the
+ * underlying call in a try/catch so the UI button can render a meaningful
+ * error inline rather than throwing through Next's error boundary.
+ */
+export async function recategoriseEverything(): Promise<RecategoriseResultPayload> {
+  try {
+    const { scanned, changed } = recategoriseAllTransactions();
+    revalidateCategoryViews();
+    return { ok: true, scanned, changed };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: message };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Per-transaction manual override (the inspector page's edit affordance)
+// ---------------------------------------------------------------------------
+
+export type TransactionOverrideResult =
+  | { ok: true }
+  | { ok: false; error: string };
+
+interface OverrideInput {
+  /**
+   * New category. Empty string / undefined = don't change category (the
+   * manual_category flag won't flip for this call).
+   */
+  category?: string;
+  subcategory?: string;
+  /**
+   * New flow type. Empty string / undefined = don't change flow_type.
+   */
+  flowType?: string;
+}
+
+/**
+ * Pin a category and/or flow_type on a single transaction. Only the
+ * fields the caller actually supplies are written, and only the
+ * corresponding `manual_*` flag is flipped to 1. This means editing only
+ * the flow_type doesn't accidentally lock the category from future rule
+ * passes too.
+ *
+ * Validation is permissive on category (it may be a value not in the
+ * dropdown for historical rows) but strict on flow_type.
+ */
+export async function setTransactionOverride(
+  transactionId: string,
+  input: OverrideInput,
+): Promise<TransactionOverrideResult> {
+  try {
+    const db = getDb();
+    const updates: string[] = [];
+    const params: (string | number)[] = [];
+
+    if (input.flowType !== undefined && input.flowType !== "") {
+      if (!VALID_FLOW_TYPES.has(input.flowType)) {
+        return { ok: false, error: `Unknown flow type: ${input.flowType}` };
+      }
+      updates.push("flow_type = ?", "manual_flow_type = 1");
+      params.push(input.flowType);
+    }
+    if (input.category !== undefined && input.category !== "") {
+      if (!VALID_CATEGORY_VALUES.has(input.category)) {
+        return { ok: false, error: `Unknown category: ${input.category}` };
+      }
+      updates.push("category = ?", "manual_category = 1");
+      params.push(input.category);
+      if (input.subcategory !== undefined) {
+        updates.push("subcategory = ?");
+        params.push(input.subcategory);
+      }
+    }
+
+    if (updates.length === 0) {
+      return { ok: false, error: "No fields to update." };
+    }
+
+    params.push(transactionId);
+    const sql = `UPDATE transactions SET ${updates.join(", ")} WHERE transaction_id = ?`;
+    db.prepare(sql).run(...params);
+
+    revalidateCategoryViews();
+    revalidatePath("/settings/transactions");
+    return { ok: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: message };
+  }
+}
+
+/**
+ * Clear both manual override flags and re-run the categoriser on this
+ * single row so the rule layer's output wins again.
+ */
+export async function clearTransactionOverride(
+  transactionId: string,
+): Promise<TransactionOverrideResult> {
+  try {
+    const db = getDb();
+    db.prepare(
+      `UPDATE transactions
+          SET manual_category = 0, manual_flow_type = 0
+        WHERE transaction_id = ?`,
+    ).run(transactionId);
+    recategoriseTransaction(transactionId);
+    revalidateCategoryViews();
+    revalidatePath("/settings/transactions");
+    return { ok: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: message };
+  }
 }

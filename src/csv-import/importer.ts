@@ -14,6 +14,7 @@ import {
   mapInstitutionRowFromConfig,
   mapTransactionRowFromImported,
 } from "./mappers.js";
+import { loadCategoryOverrides } from "./categoriser.js";
 import { parseAccessPay } from "./parsers/accesspay.js";
 import { parseStGeorge } from "./parsers/st-george.js";
 import {
@@ -102,32 +103,55 @@ export async function runImport(config: ImportConfig): Promise<ImportResult> {
   // -------------------------------------------------------------------------
   const currentBalance = computeCurrentBalance(rows);
   const dateRange = computeDateRange(rows);
+  // Load category-override rules once per import so the per-row hot path
+  // doesn't re-query.
+  const categoryRules = loadCategoryOverrides();
   const transactionRows = rows.map((row) =>
-    mapTransactionRowFromImported(row, accountId, config.currency),
+    mapTransactionRowFromImported(row, accountId, config.currency, categoryRules),
   );
   const transactionIds = transactionRows.map((r) => r.transaction_id);
   const existingTransactionIds = selectExistingTransactionIds(db, transactionIds);
 
-  // Preserve PayPal-enrichment-derived category/subcategory across CSV
-  // refreshes. When `enriched_name` is set, the row's category was last
-  // calculated from the enriched merchant name; the bank's own description
-  // (which the CSV refresh would re-categorise from) doesn't know who the
-  // merchant is, so re-applying its category would regress the row. Rows
-  // without enrichment fall through to the freshly-derived CSV category
-  // as before — that's what the CASE expressions below encode.
+  // UPSERT preservation logic (read carefully — there are three layers
+  // of "don't clobber" guards stacked here):
+  //
+  //   - category / subcategory: pinned when the user has manually
+  //     overridden them (manual_category=1) OR when PayPal enrichment
+  //     resolved a real merchant name (enriched_name set, the row's
+  //     category was last computed from that name and the bank
+  //     descriptor doesn't know who the merchant is).
+  //   - flow_type: pinned when manual_flow_type=1.
+  //   - manual_category / manual_flow_type: not in UPDATE SET, so they
+  //     survive re-imports verbatim.
+  //
+  // Rows without overrides fall through to the freshly-derived CSV values
+  // as before. New rows (INSERT path) take all values from the importer
+  // directly.
   //
   // NOTE: keep SQL comments inside this template literal as /* ... */ form
   // only. A `-- comment` here is parsed by TypeScript as the `--` decrement
   // operator before the runtime ever sees the string, which breaks compile.
   const upsertTransaction = db.prepare(`
-    INSERT INTO transactions (transaction_id, account_id, amount, date, name, raw_name, merchant_name, category, subcategory, pending, iso_currency_code, payment_channel, logo_url, website)
-    VALUES (@transaction_id, @account_id, @amount, @date, @name, @raw_name, @merchant_name, @category, @subcategory, @pending, @iso_currency_code, @payment_channel, @logo_url, @website)
+    INSERT INTO transactions (transaction_id, account_id, amount, date, name, raw_name, merchant_name, category, subcategory, pending, iso_currency_code, payment_channel, logo_url, website, flow_type, manual_category, manual_flow_type)
+    VALUES (@transaction_id, @account_id, @amount, @date, @name, @raw_name, @merchant_name, @category, @subcategory, @pending, @iso_currency_code, @payment_channel, @logo_url, @website, @flow_type, @manual_category, @manual_flow_type)
     ON CONFLICT(transaction_id) DO UPDATE SET
       amount=excluded.amount, date=excluded.date, name=excluded.name,
       raw_name=excluded.raw_name,
       merchant_name=excluded.merchant_name,
-      category = CASE WHEN transactions.enriched_name IS NULL THEN excluded.category ELSE transactions.category END,
-      subcategory = CASE WHEN transactions.enriched_name IS NULL THEN excluded.subcategory ELSE transactions.subcategory END,
+      category = CASE
+        WHEN transactions.manual_category = 1 THEN transactions.category
+        WHEN transactions.enriched_name IS NULL THEN excluded.category
+        ELSE transactions.category
+      END,
+      subcategory = CASE
+        WHEN transactions.manual_category = 1 THEN transactions.subcategory
+        WHEN transactions.enriched_name IS NULL THEN excluded.subcategory
+        ELSE transactions.subcategory
+      END,
+      flow_type = CASE
+        WHEN transactions.manual_flow_type = 1 THEN transactions.flow_type
+        ELSE excluded.flow_type
+      END,
       pending=excluded.pending,
       payment_channel=excluded.payment_channel, logo_url=excluded.logo_url,
       website=excluded.website

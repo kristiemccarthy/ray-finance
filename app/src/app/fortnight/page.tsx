@@ -125,6 +125,8 @@ function humaniseCategory(category: string): string {
     GENERAL_SERVICES: "Services",
     RENT_AND_UTILITIES: "Rent & Utilities",
     BANK_FEES: "Bank Fees",
+    ALCOHOL: "Alcohol",
+    PET_CARE: "Pet Care",
   };
   if (overrides[category]) return overrides[category];
   return category

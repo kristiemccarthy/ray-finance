@@ -18,7 +18,10 @@
 
 import { parse } from "csv-parse/sync";
 import { getDb } from "../db/connection.js";
-import { categoriseFromDescription } from "../basiq/categories.js";
+import {
+  categoriseWithRules,
+  loadCategoryOverrides,
+} from "../csv-import/categoriser.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -370,35 +373,66 @@ export function matchPaypalToBank(): {
  */
 export function recategoriseEnrichedTransactions(): number {
   const db = getDb();
+  // Pull raw_name + flow_type + manual flags so the categoriser layer can
+  // see all the inputs and the manual override flags are honoured. Even
+  // after PayPal enrichment gives us a real merchant name, override rules
+  // might still be written against the original bank descriptor — and the
+  // user may have pinned values manually via the inspector.
   const rows = db
     .prepare(
-      `SELECT transaction_id, enriched_name, category, subcategory
+      `SELECT transaction_id, enriched_name, raw_name, amount,
+              category, subcategory, flow_type,
+              manual_category, manual_flow_type
          FROM transactions
         WHERE enriched_name IS NOT NULL`,
     )
     .all() as {
     transaction_id: string;
     enriched_name: string;
+    raw_name: string | null;
+    amount: number;
     category: string | null;
     subcategory: string | null;
+    flow_type: string | null;
+    manual_category: number;
+    manual_flow_type: number;
   }[];
 
   const update = db.prepare(
-    `UPDATE transactions SET category = ?, subcategory = ? WHERE transaction_id = ?`,
+    `UPDATE transactions
+        SET category = ?, subcategory = ?, flow_type = ?
+      WHERE transaction_id = ?`,
   );
+
+  // Pull rules once — same hot-path consideration as the importer.
+  const rules = loadCategoryOverrides();
 
   let changed = 0;
   const write = db.transaction(() => {
     for (const r of rows) {
-      const matched = categoriseFromDescription(r.enriched_name);
+      const matched = categoriseWithRules(
+        r.enriched_name,
+        r.raw_name,
+        rules,
+        r.amount,
+      );
       if (!matched) continue;
+      // Honour manual pins field-by-field. Mirrors recategorise.ts.
+      const category = r.manual_category ? r.category ?? matched.category : matched.category;
+      const subcategory = r.manual_category
+        ? r.subcategory ?? matched.subcategory
+        : matched.subcategory;
+      const flowType = r.manual_flow_type
+        ? r.flow_type ?? matched.flowType
+        : matched.flowType;
       if (
-        matched.category === r.category &&
-        (matched.subcategory ?? null) === (r.subcategory ?? null)
+        category === r.category &&
+        (subcategory ?? null) === (r.subcategory ?? null) &&
+        flowType === r.flow_type
       ) {
         continue;
       }
-      update.run(matched.category, matched.subcategory ?? null, r.transaction_id);
+      update.run(category, subcategory ?? null, flowType, r.transaction_id);
       changed++;
     }
   });

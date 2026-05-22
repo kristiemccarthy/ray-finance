@@ -56,6 +56,8 @@ const CATEGORY_LABEL: Record<string, string> = {
   MEDICAL: "Medical",
   GENERAL_MERCHANDISE: "Shopping",
   ENTERTAINMENT: "Entertainment",
+  ALCOHOL: "Alcohol",
+  PET_CARE: "Pet Care",
 };
 
 const STATUS_STRIPE: Record<GoalStatusLabel, string> = {

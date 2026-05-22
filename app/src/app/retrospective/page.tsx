@@ -24,6 +24,8 @@ const CATEGORY_LABELS: Record<RetrospectiveCategoryKey, string> = {
   MEDICAL: "Medical",
   GENERAL_MERCHANDISE: "Shopping",
   ENTERTAINMENT: "Entertainment",
+  ALCOHOL: "Alcohol",
+  PET_CARE: "Pet Care",
   BILLS: "Bills",
   OTHER: "Other",
 };
@@ -261,8 +263,58 @@ function PeriodRow({
       <div className="space-y-6 border-t border-stone-100 px-5 py-4">
         <CategoryList period={period} />
         <TopTransactionsList period={period} />
+        <ExternalHelpAndRepayments period={period} />
       </div>
     </details>
+  );
+}
+
+function ExternalHelpAndRepayments({ period }: { period: PeriodSummary }) {
+  const showHelp = period.externalHelp.count > 0;
+  const showRepay = period.repayments.count > 0;
+  if (!showHelp && !showRepay) return null;
+  return (
+    <div className="space-y-3">
+      {showHelp && (
+        <div>
+          <h3 className="mb-1 text-xs font-medium tracking-wide text-neutral-500 uppercase">
+            External help &amp; reimbursements
+          </h3>
+          <p className="text-sm text-neutral-700 tabular-nums">
+            <span className="text-emerald-700">
+              +{moneyFormatter.format(period.externalHelp.total)}
+            </span>{" "}
+            <span className="text-neutral-500">
+              ({period.externalHelp.count}{" "}
+              {period.externalHelp.count === 1 ? "transaction" : "transactions"}) —{" "}
+              <a
+                href="/settings/transactions"
+                className="underline-offset-2 hover:text-neutral-800 hover:underline"
+              >
+                see transactions
+              </a>{" "}
+              for detail
+            </span>
+          </p>
+        </div>
+      )}
+      {showRepay && (
+        <div>
+          <h3 className="mb-1 text-xs font-medium tracking-wide text-neutral-500 uppercase">
+            Repayments
+          </h3>
+          <p className="text-sm text-neutral-700 tabular-nums">
+            <span className="text-neutral-800">
+              −{moneyFormatter.format(period.repayments.total)}
+            </span>{" "}
+            <span className="text-neutral-500">
+              ({period.repayments.count}{" "}
+              {period.repayments.count === 1 ? "transaction" : "transactions"})
+            </span>
+          </p>
+        </div>
+      )}
+    </div>
   );
 }
 

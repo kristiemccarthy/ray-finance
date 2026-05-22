@@ -40,6 +40,8 @@ const CATEGORY_OPTIONS = [
   { value: "MEDICAL", label: "Medical" },
   { value: "GENERAL_MERCHANDISE", label: "Shopping" },
   { value: "ENTERTAINMENT", label: "Entertainment" },
+  { value: "ALCOHOL", label: "Alcohol" },
+  { value: "PET_CARE", label: "Pet Care" },
 ];
 
 const moneyFormatter = new Intl.NumberFormat("en-AU", {

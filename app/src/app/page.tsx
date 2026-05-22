@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { Calendar } from "lucide-react";
 import { getDb } from "@ray/db/connection";
 import { getUpcomingBills, type UpcomingBill } from "@ray/db/bills";
@@ -89,16 +88,7 @@ export default function Home() {
           </ul>
         )}
 
-        <p className="mt-10 text-center text-xs text-neutral-400">
-          <Link
-            href="/bills/manage"
-            className="underline-offset-2 hover:text-neutral-700 hover:underline"
-          >
-            Manage bills
-          </Link>
-        </p>
-
-        <div className="mt-4">
+        <div className="mt-10">
           <PaypalImportControl action={importPaypal} />
         </div>
       </div>

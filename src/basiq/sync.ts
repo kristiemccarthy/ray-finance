@@ -143,13 +143,19 @@ export async function syncConnection(
       balance_limit=excluded.balance_limit, updated_at=datetime('now')
   `);
 
+  /* Mirrors the CSV importer's UPSERT preservation logic: rows with
+     manual category or flow_type pins are not overwritten by the basiq
+     refresh. See `src/csv-import/importer.ts` for the full rationale. */
   const upsertTransaction = db.prepare(`
-    INSERT INTO transactions (transaction_id, account_id, amount, date, name, merchant_name, category, subcategory, pending, iso_currency_code, payment_channel, logo_url, website)
-    VALUES (@transaction_id, @account_id, @amount, @date, @name, @merchant_name, @category, @subcategory, @pending, @iso_currency_code, @payment_channel, @logo_url, @website)
+    INSERT INTO transactions (transaction_id, account_id, amount, date, name, merchant_name, category, subcategory, pending, iso_currency_code, payment_channel, logo_url, website, flow_type, manual_category, manual_flow_type)
+    VALUES (@transaction_id, @account_id, @amount, @date, @name, @merchant_name, @category, @subcategory, @pending, @iso_currency_code, @payment_channel, @logo_url, @website, @flow_type, @manual_category, @manual_flow_type)
     ON CONFLICT(transaction_id) DO UPDATE SET
       amount=excluded.amount, date=excluded.date, name=excluded.name,
-      merchant_name=excluded.merchant_name, category=excluded.category,
-      subcategory=excluded.subcategory, pending=excluded.pending,
+      merchant_name=excluded.merchant_name,
+      category = CASE WHEN transactions.manual_category = 1 THEN transactions.category ELSE excluded.category END,
+      subcategory = CASE WHEN transactions.manual_category = 1 THEN transactions.subcategory ELSE excluded.subcategory END,
+      flow_type = CASE WHEN transactions.manual_flow_type = 1 THEN transactions.flow_type ELSE excluded.flow_type END,
+      pending=excluded.pending,
       payment_channel=excluded.payment_channel, logo_url=excluded.logo_url,
       website=excluded.website
   `);

@@ -27,6 +27,8 @@ export type RetrospectiveCategoryKey =
   | "MEDICAL"
   | "GENERAL_MERCHANDISE"
   | "ENTERTAINMENT"
+  | "ALCOHOL"
+  | "PET_CARE"
   | "BILLS"
   | "OTHER";
 
@@ -47,13 +49,22 @@ export interface TopTransaction {
 
 export interface PeriodSummary {
   window: PeriodWindow;
-  /** Absolute dollars of incoming money (sign of source rows is negative). */
+  /**
+   * Earned income only — sum of `|amount|` for rows where
+   * `flow_type = 'EARNED_INCOME'` and amount < 0. Excludes internal
+   * transfers, external help, refunds, and any incoming flow the user
+   * has tagged separately.
+   */
   incomeTotal: number;
-  /** Dollars of outgoing money. */
+  /**
+   * Outgoing spending only — sum of amount for rows where
+   * `flow_type = 'SPENDING'` and amount > 0. Excludes repayments,
+   * transfers, and any other non-spending outflow.
+   */
   outflowTotal: number;
   /** incomeTotal − outflowTotal. Positive = surplus. */
   net: number;
-  /** Per-category outflow totals. */
+  /** Per-category outflow totals — SPENDING flow only. */
   byCategory: Record<RetrospectiveCategoryKey, number>;
   /**
    * Per-category totals for the period immediately before this one. `null`
@@ -61,8 +72,12 @@ export interface PeriodSummary {
    * against — the page renders dollar amounts only in that case.
    */
   priorByCategory: Record<RetrospectiveCategoryKey, number> | null;
-  /** Largest three outflows, descending. */
+  /** Largest three SPENDING outflows, descending. */
   topTransactions: TopTransaction[];
+  /** Sum of |amount| for EXTERNAL_GIFT + REIMBURSEMENT rows, plus count. */
+  externalHelp: { total: number; count: number };
+  /** Sum of amount for REPAYMENT rows (positive — money out), plus count. */
+  repayments: { total: number; count: number };
   /** True when at least one non-pending transaction landed in this window. */
   hasData: boolean;
 }
@@ -197,6 +212,8 @@ const CATEGORY_KEYS: RetrospectiveCategoryKey[] = [
   "MEDICAL",
   "GENERAL_MERCHANDISE",
   "ENTERTAINMENT",
+  "ALCOHOL",
+  "PET_CARE",
   "BILLS",
   "OTHER",
 ];
@@ -206,6 +223,8 @@ const EMPTY_BY_CATEGORY: Record<RetrospectiveCategoryKey, number> = {
   MEDICAL: 0,
   GENERAL_MERCHANDISE: 0,
   ENTERTAINMENT: 0,
+  ALCOHOL: 0,
+  PET_CARE: 0,
   BILLS: 0,
   OTHER: 0,
 };
@@ -250,6 +269,10 @@ function bucketize(
       return "GENERAL_MERCHANDISE";
     case "ENTERTAINMENT":
       return "ENTERTAINMENT";
+    case "ALCOHOL":
+      return "ALCOHOL";
+    case "PET_CARE":
+      return "PET_CARE";
     default:
       return "OTHER";
   }
@@ -273,6 +296,8 @@ interface RawPeriod {
   net: number;
   byCategory: Record<RetrospectiveCategoryKey, number>;
   topTransactions: TopTransaction[];
+  externalHelp: { total: number; count: number };
+  repayments: { total: number; count: number };
   hasData: boolean;
 }
 
@@ -282,9 +307,10 @@ function loadRawPeriod(
 ): RawPeriod {
   const db = getDb();
 
-  // Outflows: amount > 0, excluding internal transfers and loan principal
-  // (loans are accounted in the balance sheet, not the spending view).
-  // `enriched_name` (from the PayPal CSV import) wins over the raw bank
+  // Spending outflows: only rows tagged `flow_type = 'SPENDING'` with
+  // amount > 0. Internal transfers, repayments, and refunds (REIMBURSEMENT
+  // tagged) are all excluded — they're surfaced separately below.
+  // `enriched_name` (from PayPal CSV import) wins over the raw bank
   // descriptor whenever it's been set — so "Paypal Australia 105036…"
   // surfaces as "Spotify" / "ChatGPT" / etc. in the top-3 list.
   const outflowRows = db
@@ -294,12 +320,13 @@ function loadRawPeriod(
         WHERE date BETWEEN ? AND ?
           AND amount > 0
           AND pending = 0
-          AND (category IS NULL OR category NOT IN ('TRANSFER_IN', 'TRANSFER_OUT', 'INCOME', 'LOAN_PAYMENTS'))
+          AND flow_type = 'SPENDING'
         ORDER BY amount DESC`,
     )
     .all(window.startDate, window.endDate) as TxRow[];
 
-  // Income: amount < 0, excluding TRANSFER_IN (incoming internal movement).
+  // Earned income only — INTERNAL_TRANSFER inflows are filtered out at
+  // the flow_type level rather than via category-name guessing.
   const incomeRow = db
     .prepare(
       `SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count
@@ -307,11 +334,40 @@ function loadRawPeriod(
         WHERE date BETWEEN ? AND ?
           AND amount < 0
           AND pending = 0
-          AND (category IS NULL OR category != 'TRANSFER_IN')`,
+          AND flow_type = 'EARNED_INCOME'`,
     )
     .get(window.startDate, window.endDate) as { total: number; count: number };
-
   const incomeTotal = Math.abs(incomeRow.total);
+
+  // External help: gifts from family/friends + reimbursements/refunds.
+  // Same sign convention as income (incoming = negative on row), so abs
+  // for display.
+  const helpRow = db
+    .prepare(
+      `SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count
+         FROM transactions
+        WHERE date BETWEEN ? AND ?
+          AND pending = 0
+          AND flow_type IN ('EXTERNAL_GIFT', 'REIMBURSEMENT')`,
+    )
+    .get(window.startDate, window.endDate) as { total: number; count: number };
+  const externalHelp = {
+    total: Math.abs(helpRow.total),
+    count: helpRow.count,
+  };
+
+  // Repayments: loan principal etc. Always outgoing (amount > 0).
+  const repayRow = db
+    .prepare(
+      `SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count
+         FROM transactions
+        WHERE date BETWEEN ? AND ?
+          AND amount > 0
+          AND pending = 0
+          AND flow_type = 'REPAYMENT'`,
+    )
+    .get(window.startDate, window.endDate) as { total: number; count: number };
+  const repayments = { total: repayRow.total, count: repayRow.count };
 
   const byCategory: Record<RetrospectiveCategoryKey, number> = {
     ...EMPTY_BY_CATEGORY,
@@ -327,7 +383,11 @@ function loadRawPeriod(
     .slice(0, 3)
     .map((r) => ({ name: r.name, amount: r.amount, date: r.date }));
 
-  const hasData = outflowRows.length > 0 || incomeRow.count > 0;
+  const hasData =
+    outflowRows.length > 0 ||
+    incomeRow.count > 0 ||
+    helpRow.count > 0 ||
+    repayRow.count > 0;
 
   return {
     window,
@@ -336,6 +396,8 @@ function loadRawPeriod(
     net: incomeTotal - outflowTotal,
     byCategory,
     topTransactions,
+    externalHelp,
+    repayments,
     hasData,
   };
 }
@@ -395,6 +457,8 @@ export function getRetrospective(
       byCategory: p.byCategory,
       priorByCategory,
       topTransactions: p.topTransactions,
+      externalHelp: p.externalHelp,
+      repayments: p.repayments,
       hasData: p.hasData,
     };
   });

@@ -98,6 +98,16 @@ export interface TransactionRow {
   website: string | null;
   label: string | null;
   note: string | null;
+  /**
+   * Six-bucket cashflow taxonomy — see `src/csv-import/categoriser.ts`.
+   * Derived from `category` at import time, refinable via rules and the
+   * transaction inspector.
+   */
+  flow_type: string;
+  /** When 1, the recategoriser leaves `category` / `subcategory` alone. */
+  manual_category: number;
+  /** When 1, the recategoriser leaves `flow_type` alone. */
+  manual_flow_type: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +248,19 @@ export function mapTransactionRow(transaction: BasiqTransaction): TransactionRow
     category = "TRANSFER_IN";
   }
 
+  // Derive flow_type from the resolved category. The basiq mapper doesn't
+  // run the rule layer (rules live in `src/csv-import/categoriser.ts` and
+  // are CSV-import-specific). Once these rows land in the DB, the bulk
+  // recategoriser will refine them in the next pass.
+  const flowType =
+    category === "INCOME"
+      ? "EARNED_INCOME"
+      : category === "TRANSFER_IN" || category === "TRANSFER_OUT"
+        ? "INTERNAL_TRANSFER"
+        : category === "LOAN_PAYMENTS"
+          ? "REPAYMENT"
+          : "SPENDING";
+
   return {
     transaction_id: transaction.id,
     account_id: transaction.account,
@@ -257,6 +280,9 @@ export function mapTransactionRow(transaction: BasiqTransaction): TransactionRow
     website: transaction.enrich?.merchant?.website ?? null,
     label: null,
     note: null,
+    flow_type: flowType,
+    manual_category: 0,
+    manual_flow_type: 0,
   };
 }
 
