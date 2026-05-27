@@ -51,7 +51,18 @@
       "Bash(curl -s http://localhost:3000/settings/categories)",
       "Bash(curl -s http://localhost:3000/settings/categories/new)",
       "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\" http://localhost:3000/ --max-time 5)",
-      "Bash(curl -s http://localhost:3000/settings)"
+      "Bash(curl -s http://localhost:3000/settings)",
+      "Bash(ls -la \"C:/Users/krist/Downloads/Bank statements/\" 2>&1)",
+      "Bash(git --no-pager diff src/csv-import/types.ts)",
+      "Bash(git --no-pager diff -- src/csv-import/importer.ts)",
+      "Bash(git --no-pager diff -- src/csv-import/refresh.ts)",
+      "Bash(git --no-pager diff -- src/csv-import/cli.ts)",
+      "Bash(git --no-pager diff -- app/src/components/sparkline.tsx app/src/app/retrospective/page.tsx)",
+      "Bash(git --no-pager diff -- app/tsconfig.json)",
+      "Bash(git --no-pager diff -- app/package.json)",
+      "Bash(git --no-pager diff --stat -- app/package-lock.json)",
+      "Bash(git --no-pager diff -- app/package-lock.json)",
+      "Bash(git checkout *)"
     ]
   }
 }
