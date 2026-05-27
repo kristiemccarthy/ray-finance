@@ -16,7 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { runImport } from "./importer.js";
-import type { ImportSource } from "./types.js";
+import type { ImportSource, IntraDayOrder } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Source specifications
@@ -30,6 +30,8 @@ interface SourceSpec {
   accountName: string;
   accountType: string;
   accountSubtype: string;
+  /** Same-day row-order convention — see `IntraDayOrder` in types.ts. */
+  intraDayOrder: IntraDayOrder;
   /**
    * How to locate matching files in the download directory.
    *   - `exact`: a single file with this exact name (one occurrence).
@@ -50,6 +52,7 @@ const SOURCES: SourceSpec[] = [
     accountName: "Personal",
     accountType: "depository",
     accountSubtype: "checking",
+    intraDayOrder: "newest-first",
     match: { kind: "exact", fileName: "St George Personal.csv" },
   },
   {
@@ -59,6 +62,7 @@ const SOURCES: SourceSpec[] = [
     accountName: "Mojo",
     accountType: "depository",
     accountSubtype: "savings",
+    intraDayOrder: "newest-first",
     match: { kind: "exact", fileName: "St George Mojo.csv" },
   },
   {
@@ -68,6 +72,7 @@ const SOURCES: SourceSpec[] = [
     accountName: "Salary Card",
     accountType: "depository",
     accountSubtype: "prepaid",
+    intraDayOrder: "oldest-first",
     match: {
       kind: "pattern",
       // Accesspay statements come down as one PDF per financial year, with
@@ -151,6 +156,7 @@ export async function refreshFromDirectory(dir: string): Promise<RefreshSummary>
           accountSubtype: spec.accountSubtype,
           currency: "AUD",
           filePath,
+          intraDayOrder: spec.intraDayOrder,
         });
         filesSucceeded++;
         transactionsAdded += result.transactionsAdded;

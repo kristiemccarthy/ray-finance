@@ -25,6 +25,7 @@ import type {
   ImportConfig,
   ImportedRow,
   ImportResult,
+  IntraDayOrder,
   Parser,
 } from "./types.js";
 
@@ -101,7 +102,7 @@ export async function runImport(config: ImportConfig): Promise<ImportResult> {
   // -------------------------------------------------------------------------
   // Compute snapshot fields the row writes depend on.
   // -------------------------------------------------------------------------
-  const currentBalance = computeCurrentBalance(rows);
+  const currentBalance = computeCurrentBalance(rows, config.intraDayOrder);
   const dateRange = computeDateRange(rows);
   // Load category-override rules once per import so the per-row hot path
   // doesn't re-query.
@@ -222,16 +223,28 @@ function pickParser(source: ImportConfig["source"]): Parser {
 }
 
 /**
- * Take the balance from the chronologically latest row. When multiple
- * rows share the latest date, the last one in file order wins (CSV exports
- * are typically ordered chronologically, so this is the freshest snapshot).
- * Returns `null` when the latest row's balance is missing.
+ * Pick the balance from the chronologically-latest row in the import
+ * batch. Same-date ties are resolved using the source's `intraDayOrder`
+ * convention:
+ *   - `newest-first`: the first row at the latest date is the chronological
+ *     winner (St George CSV exports newest-first within each date).
+ *   - `oldest-first`: the last row at the latest date is the chronological
+ *     winner (AccessPay PDF prints oldest-first, with the day's closing
+ *     balance at the bottom).
+ * Returns `null` when the chosen row's balance is missing.
  */
-function computeCurrentBalance(rows: ImportedRow[]): number | null {
+function computeCurrentBalance(
+  rows: ImportedRow[],
+  intraDayOrder: IntraDayOrder,
+): number | null {
   let latestDate = "";
   let balance: number | null = null;
   for (const row of rows) {
-    if (row.date >= latestDate) {
+    const shouldUpdate =
+      intraDayOrder === "newest-first"
+        ? row.date > latestDate   // first row at a new latest date wins; later same-date rows ignored
+        : row.date >= latestDate; // last row at the latest date wins; keep overwriting on tie
+    if (shouldUpdate) {
       latestDate = row.date;
       balance = row.balance;
     }

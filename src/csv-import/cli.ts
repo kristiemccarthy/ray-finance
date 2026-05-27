@@ -15,7 +15,7 @@
 
 import path from "node:path";
 import { runImport } from "./importer.js";
-import type { ImportConfig, ImportSource } from "./types.js";
+import type { ImportConfig, ImportSource, IntraDayOrder } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -29,6 +29,10 @@ const VALID_TYPES = [
   "investment",
   "other",
 ] as const;
+const VALID_INTRA_DAY_ORDERS: readonly IntraDayOrder[] = [
+  "newest-first",
+  "oldest-first",
+];
 
 const USAGE = `
 Usage: tsx src/csv-import/cli.ts [options]
@@ -43,6 +47,9 @@ Required:
 
 Optional:
   --currency <code>                ISO 4217 currency code (default: AUD)
+  --intra-day-order <order>        Same-day row ordering in the source file:
+                                   "newest-first" (default, e.g. St George CSV)
+                                   or "oldest-first" (e.g. AccessPay PDF)
 `.trim();
 
 // ---------------------------------------------------------------------------
@@ -78,6 +85,14 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  const intraDayOrderArg = (args["intra-day-order"] ?? "newest-first") as string;
+  if (!VALID_INTRA_DAY_ORDERS.includes(intraDayOrderArg as IntraDayOrder)) {
+    console.error(
+      `Invalid --intra-day-order "${intraDayOrderArg}". Expected one of: ${VALID_INTRA_DAY_ORDERS.join(", ")}.`,
+    );
+    process.exit(1);
+  }
+
   const config: ImportConfig = {
     source: source as ImportSource,
     bankName: args.bank!,
@@ -86,6 +101,7 @@ async function main(): Promise<void> {
     accountSubtype: args.subtype!,
     currency: args.currency ?? "AUD",
     filePath: path.resolve(args.file!),
+    intraDayOrder: intraDayOrderArg as IntraDayOrder,
   };
 
   const result = await runImport(config);

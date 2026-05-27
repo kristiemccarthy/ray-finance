@@ -51,6 +51,20 @@ export interface ImportedRow {
 export type ImportSource = "st-george" | "accesspay";
 
 /**
+ * Row order *within* a single date in the source file.
+ *
+ *   - `newest-first`: chronologically-latest row at a given date appears
+ *     first in the file (St George CSV convention).
+ *   - `oldest-first`: chronologically-latest row at a given date appears
+ *     last in the file (AccessPay PDF convention — closing balance at the
+ *     bottom of each day).
+ *
+ * Drives `computeCurrentBalance`'s same-day tiebreaker so the account row
+ * picks up the right post-transaction balance regardless of source.
+ */
+export type IntraDayOrder = "newest-first" | "oldest-first";
+
+/**
  * Per-import configuration. Most of these fields are user-supplied (via
  * the CLI / UI) because CSVs don't carry account metadata themselves.
  */
@@ -69,6 +83,11 @@ export interface ImportConfig {
   currency: string;
   /** Absolute path to the source file. */
   filePath: string;
+  /**
+   * How this source orders rows within a single date. Used to pick the
+   * correct same-day balance — see `IntraDayOrder` above.
+   */
+  intraDayOrder: IntraDayOrder;
 }
 
 /**
