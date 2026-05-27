@@ -169,6 +169,17 @@ function NetCashflowHero({
     p.net < 0 ? COLOUR_NEGATIVE : undefined,
   );
 
+  // 3-period rolling average of net cashflow. At each position i, mean
+  // of values[i-2..i], clamped to whatever history is actually visible
+  // (drawing from the displayed set only — no peek-back beyond the
+  // window the user selected). Index 0 is its own single-point average;
+  // index 1 averages indices 0–1; index 2+ uses the full 3-point window.
+  const trendValues = values.map((_, i) => {
+    const start = Math.max(0, i - 2);
+    const window = values.slice(start, i + 1);
+    return window.reduce((s, v) => s + v, 0) / window.length;
+  });
+
   // Sparkline needs at least two points to render. Single-period histories
   // get a textual fallback so the page doesn't show a silent gap.
   return (
@@ -179,10 +190,11 @@ function NetCashflowHero({
             values={values}
             pointLabels={labels}
             pointColors={colors}
+            trendValues={trendValues}
             width={672}
             height={140}
             className="h-32 w-full"
-            ariaLabel={`Net cashflow across last ${count} ${view === "calendar" ? "months" : "cycles"}`}
+            ariaLabel={`Net cashflow across last ${count} ${view === "calendar" ? "months" : "cycles"}, with 3-period rolling average`}
           />
         </div>
       ) : (
@@ -193,7 +205,8 @@ function NetCashflowHero({
       <p className="mt-3 text-center text-xs leading-relaxed text-neutral-500">
         Net cashflow across last {count}{" "}
         {view === "calendar" ? "months" : "cycles"}. Dots above zero are
-        positive periods; below are negative.
+        positive periods; below are negative. Lighter line shows 3-period
+        rolling average.
       </p>
     </section>
   );

@@ -23,6 +23,15 @@ interface SparklineProps {
    * Triggers a few automatic adjustments — see `preserveAspectRatio` below.
    */
   pointLabels?: string[];
+  /**
+   * Optional secondary series rendered as a muted line on top of the
+   * primary one — used by /retrospective to overlay a rolling-average
+   * trend. Must be the same length as `values` (or shorter — extra
+   * trailing positions just won't render). Non-finite entries (NaN /
+   * undefined) break the line into segments so gaps stay visually
+   * honest rather than connecting across missing data.
+   */
+  trendValues?: (number | null | undefined)[];
   /** Logical pixel width — also the viewBox width. */
   width?: number;
   /** Logical pixel height — also the viewBox height. */
@@ -38,6 +47,11 @@ interface SparklineProps {
   ariaLabel?: string;
 }
 
+// Slate-400. Chosen to read as "supporting context" against the main
+// `currentColor` line (typically slate-500 in the retrospective use)
+// without disappearing on light backgrounds.
+const TREND_STROKE = "#94a3b8";
+
 const DEFAULT_W = 672;
 const DEFAULT_H = 80;
 const PADDING = 8;
@@ -48,6 +62,7 @@ export function Sparkline({
   target,
   pointColors,
   pointLabels,
+  trendValues,
   width = DEFAULT_W,
   height = DEFAULT_H,
   preserveAspectRatio,
@@ -63,10 +78,13 @@ export function Sparkline({
   const aspect: "none" | "xMidYMid meet" =
     preserveAspectRatio ?? (pointLabels ? "xMidYMid meet" : "none");
 
-  // Include `target` in the y-range so the dashed line is always on-canvas,
-  // even when the trajectory sits entirely above or below the goal.
-  const min = Math.min(...values, target ?? values[0]);
-  const max = Math.max(...values, target ?? values[0]);
+  // Include `target` AND any finite trend values in the y-range so neither
+  // the dashed target line nor the trend overlay clips outside the chart.
+  const finiteTrendValues = (trendValues ?? []).filter(
+    (v): v is number => typeof v === "number" && Number.isFinite(v),
+  );
+  const min = Math.min(...values, ...finiteTrendValues, target ?? values[0]);
+  const max = Math.max(...values, ...finiteTrendValues, target ?? values[0]);
   const range = max - min || 1;
   const stepX = (width - 2 * PADDING) / (values.length - 1);
 
@@ -78,6 +96,29 @@ export function Sparkline({
     return [x, yFor(v)] as const;
   });
   const polyline = coords.map(([x, y]) => `${x},${y}`).join(" ");
+
+  // Build trend segments — break at any non-finite entry so a missing point
+  // shows as a gap rather than a line connecting across the absent value.
+  // Single-point segments are dropped (a polyline needs ≥2 points).
+  const trendSegments: string[] = [];
+  if (trendValues && trendValues.length > 0) {
+    let current: string[] = [];
+    const flush = () => {
+      if (current.length >= 2) trendSegments.push(current.join(" "));
+      current = [];
+    };
+    const upTo = Math.min(trendValues.length, values.length);
+    for (let i = 0; i < upTo; i++) {
+      const v = trendValues[i];
+      if (typeof v === "number" && Number.isFinite(v)) {
+        const x = PADDING + i * stepX;
+        current.push(`${x},${yFor(v)}`);
+      } else {
+        flush();
+      }
+    }
+    flush();
+  }
 
   const targetY = target === undefined ? null : yFor(target);
   // Render a faint zero baseline when the series straddles zero — useful
@@ -116,6 +157,17 @@ export function Sparkline({
           opacity={0.4}
         />
       )}
+      {trendSegments.map((points, i) => (
+        <polyline
+          key={`trend-${i}`}
+          points={points}
+          fill="none"
+          stroke={TREND_STROKE}
+          strokeWidth={1.5}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      ))}
       <polyline
         points={polyline}
         fill="none"
