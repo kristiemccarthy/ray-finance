@@ -8,7 +8,12 @@ import { computeScenarioForecast } from "../actions";
 
 export const dynamic = "force-dynamic";
 
-const WHAT_IF_ACCOUNT_ID = "csv:st-george:personal";
+// Mirror the forecast page's whole-of-money scope (Personal + Salary Card;
+// Mojo excluded) so what-if baselines match the headline forecast.
+const WHAT_IF_ACCOUNT_IDS = [
+  "csv:st-george:personal",
+  "csv:accesspay:salary-card",
+];
 /**
  * Default horizon for the initial server-rendered baseline. The client can
  * pick longer horizons via the dropdown, but those re-fetch through the
@@ -37,12 +42,12 @@ export interface ScenarioListItem {
  * falls back to the original `description`, matching the convention used by
  * the rest of the app.
  */
-function buildLists(accountId: string): {
+function buildLists(accountIds: string[]): {
   manualBills: ScenarioListItem[];
   recurringOutflows: ScenarioListItem[];
   recurringInflows: ScenarioListItem[];
 } {
-  const sources = loadForecastSources(accountId);
+  const sources = loadForecastSources(accountIds);
 
   const manualBills: ScenarioListItem[] = sources.manualRows.map((r) => ({
     key: `manual:${r.id}`,
@@ -78,11 +83,11 @@ function buildLists(accountId: string): {
 
 export default function WhatIfPage() {
   const baseline: ForecastResult = forecastBalance({
-    accountId: WHAT_IF_ACCOUNT_ID,
+    accountIds: WHAT_IF_ACCOUNT_IDS,
     cycleAnchorDayOfWeek: 3,
     numberOfCycles: DEFAULT_HORIZON,
   });
-  const lists = buildLists(WHAT_IF_ACCOUNT_ID);
+  const lists = buildLists(WHAT_IF_ACCOUNT_IDS);
 
   return (
     <main className="text-neutral-800">

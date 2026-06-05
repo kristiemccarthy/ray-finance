@@ -58,7 +58,8 @@ function main(): void {
   const cycleAnchorDayOfWeek = args.anchor ? parseAnchor(args.anchor) : undefined;
 
   const result = forecastBalance({
-    accountId: args.account!,
+    // CLI forecasts a single account passed via --account.
+    accountIds: [args.account!],
     ...(numberOfCycles !== undefined ? { numberOfCycles } : {}),
     ...(cycleAnchorDayOfWeek !== undefined ? { cycleAnchorDayOfWeek } : {}),
   });

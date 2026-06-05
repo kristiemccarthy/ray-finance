@@ -1,4 +1,5 @@
 import { ChevronRight } from "lucide-react";
+import { getDb } from "@ray/db/connection";
 import {
   forecastBalance,
   loadForecastSettings,
@@ -8,6 +9,23 @@ import {
 } from "@ray/csv-import/balance-forecast";
 
 export const dynamic = "force-dynamic";
+
+// Accounts aggregated into the whole-of-money forecast. Mojo (savings) is
+// deliberately excluded — see the footer note — so the projection reflects
+// operating position rather than spending down savings on paper.
+const FORECAST_ACCOUNT_IDS = [
+  "csv:st-george:personal",
+  "csv:accesspay:salary-card",
+];
+const MOJO_ACCOUNT_ID = "csv:st-george:mojo";
+
+/** Current Mojo balance, read live so the footer note stays accurate. */
+function readMojoBalance(): number {
+  const row = getDb()
+    .prepare(`SELECT current_balance FROM accounts WHERE account_id = ?`)
+    .get(MOJO_ACCOUNT_ID) as { current_balance: number | null } | undefined;
+  return row?.current_balance ?? 0;
+}
 
 const moneyFormatter = new Intl.NumberFormat("en-AU", {
   style: "currency",
@@ -74,10 +92,11 @@ function signedDelta(delta: number): string {
 
 export default function ForecastPage() {
   const result: ForecastResult = forecastBalance({
-    accountId: "csv:st-george:personal",
+    accountIds: FORECAST_ACCOUNT_IDS,
     cycleAnchorDayOfWeek: 3,
     numberOfCycles: 4,
   });
+  const mojoBalance = readMojoBalance();
   const settings = loadForecastSettings();
   const budgetsPerCycle = result.cycleAdjustment - settings.perCycleBuffer;
 
@@ -114,10 +133,11 @@ export default function ForecastPage() {
         </div>
 
         <p className="mt-16 text-center text-xs leading-relaxed text-neutral-400">
-          Forecast subtracts your monthly budgets (
-          {moneyFormatter.format(budgetsPerCycle)}/cycle) plus a{" "}
-          {moneyFormatter.format(settings.perCycleBuffer)}/cycle buffer for
-          unexpected costs. Edit{" "}
+          Across Personal + Salary Card. Mojo savings (currently{" "}
+          {moneyFormatter.format(mojoBalance)}) is excluded. Forecast subtracts
+          your monthly budgets ({moneyFormatter.format(budgetsPerCycle)}/cycle)
+          plus a {moneyFormatter.format(settings.perCycleBuffer)}/cycle buffer
+          for unexpected costs. Edit{" "}
           <code className="rounded bg-stone-100 px-1 py-0.5 text-[11px] text-neutral-500">
             ~/.ray/forecast.json
           </code>{" "}

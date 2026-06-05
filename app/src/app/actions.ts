@@ -470,7 +470,12 @@ export async function updateBill(
 // What-if scenario forecast
 // ---------------------------------------------------------------------------
 
-const WHAT_IF_ACCOUNT_ID = "csv:st-george:personal";
+// Mirror the forecast page's whole-of-money scope (Personal + Salary Card;
+// Mojo excluded) so scenario forecasts match the headline forecast.
+const WHAT_IF_ACCOUNT_IDS = [
+  "csv:st-george:personal",
+  "csv:accesspay:salary-card",
+];
 
 export type ScenarioForecastResult =
   | { ok: true; result: ForecastResult }
@@ -500,10 +505,10 @@ export async function computeScenarioForecast(
       ? horizon
       : DEFAULT_HORIZON;
     const clean = sanitiseScenario(scenario);
-    const sources = loadForecastSources(WHAT_IF_ACCOUNT_ID);
+    const sources = loadForecastSources(WHAT_IF_ACCOUNT_IDS);
     const transformed = applyScenario(sources, clean);
     const result = forecastBalance({
-      accountId: WHAT_IF_ACCOUNT_ID,
+      accountIds: WHAT_IF_ACCOUNT_IDS,
       cycleAnchorDayOfWeek: 3,
       numberOfCycles: cycles,
       sources: transformed,

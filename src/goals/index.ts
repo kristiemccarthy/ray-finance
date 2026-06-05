@@ -469,7 +469,8 @@ function computeBalanceSavingsStatus(goal: Goal, now: Date): GoalStatus {
       const cyclesNeeded = Math.min(52, Math.max(1, Math.ceil(days / CYCLE_LENGTH_DAYS)));
       try {
         const forecast = forecastBalance({
-          accountId,
+          // Goals track a single account, so the forecast stays single-account.
+          accountIds: [accountId],
           cycleAnchorDayOfWeek: 3,
           numberOfCycles: cyclesNeeded,
         });

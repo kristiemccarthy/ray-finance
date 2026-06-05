@@ -62,7 +62,18 @@
       "Bash(git --no-pager diff -- app/package.json)",
       "Bash(git --no-pager diff --stat -- app/package-lock.json)",
       "Bash(git --no-pager diff -- app/package-lock.json)",
-      "Bash(git checkout *)"
+      "Bash(git checkout *)",
+      "Bash(node -e ' *)",
+      "Bash(npx --yes tsx -e ' *)",
+      "Bash(cat)",
+      "Bash(npx --yes tsx /tmp/cattest.mjs)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(npx --yes tsx ./_verify.ts)",
+      "Bash(git --no-pager log --oneline -8)",
+      "Bash(git --no-pager status --short)",
+      "Bash(git reset *)",
+      "Bash(git commit *)",
+      "Bash(git --no-pager log -4 --stat --format='%h %s%n')"
     ]
   }
 }

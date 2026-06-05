@@ -31,8 +31,18 @@ import { predictNextBillDate, isOccurrencePaid, addMonths } from "../db/bills.js
 // ---------------------------------------------------------------------------
 
 export interface ForecastOptions {
-  /** Account to forecast (e.g. `csv:st-george:personal`). */
-  accountId: string;
+  /**
+   * Accounts to forecast as one aggregated pool — balances are summed and
+   * recurring streams from every listed account are included (e.g. Personal +
+   * Salary Card for a whole-of-money view). Supply this OR `accountId`.
+   */
+  accountIds?: string[];
+  /**
+   * Single-account convenience — equivalent to `accountIds: [accountId]`.
+   * Retained for goals and the CLI, which forecast one account at a time.
+   * Ignored when `accountIds` is supplied.
+   */
+  accountId?: string;
   /** Day each pay cycle starts. 0=Sunday, 3=Wednesday. Defaults to 3. */
   cycleAnchorDayOfWeek?: number;
   /** Days per cycle. Defaults to 14. */
@@ -43,7 +53,7 @@ export interface ForecastOptions {
    * Pre-built source rows. When supplied, the forecast skips the DB query
    * step entirely and uses these instead — letting the caller pre-filter,
    * override amounts, or inject hypothetical rows (see `/what-if`). When
-   * absent, sources are loaded fresh from the DB scoped to `accountId`.
+   * absent, sources are loaded fresh from the DB scoped to the account set.
    */
   sources?: ForecastSources;
 }
@@ -131,39 +141,42 @@ const MS_PER_DAY = 86400000;
 
 export function forecastBalance(options: ForecastOptions): ForecastResult {
   const {
-    accountId,
     cycleAnchorDayOfWeek = 3,
     cycleLengthDays = 14,
     numberOfCycles = 4,
   } = options;
 
+  // Resolve the account set: `accountIds` wins; otherwise fall back to the
+  // single-account convenience. At least one must be supplied.
+  const accountIds =
+    options.accountIds ?? (options.accountId ? [options.accountId] : []);
+  if (accountIds.length === 0) {
+    throw new Error("forecastBalance requires accountIds or accountId.");
+  }
+  const accountLabel = accountIds.join(",");
+
   const db = getDb();
 
-  // 1. Current balance (warn-and-continue on null so the forecast is still
-  //    useful for an account that hasn't synced a balance yet).
-  const accountRow = db
-    .prepare(`SELECT current_balance FROM accounts WHERE account_id = ?`)
-    .get(accountId) as { current_balance: number | null } | undefined;
-
-  if (!accountRow) {
-    throw new Error(`Account not found: ${accountId}`);
-  }
-
-  let currentBalance = accountRow.current_balance;
-  if (currentBalance === null) {
-    console.warn(
-      `[forecast] Warning: account ${accountId} has null current_balance; treating as 0.`,
-    );
-    currentBalance = 0;
-  }
+  // 1. Current balance — summed across the account set so the projection
+  //    starts from the aggregated pool. COALESCE so an account with a null
+  //    balance contributes 0 rather than nulling the whole sum.
+  const placeholders = accountIds.map(() => "?").join(", ");
+  const balanceRow = db
+    .prepare(
+      `SELECT COALESCE(SUM(current_balance), 0) AS total
+         FROM accounts
+        WHERE account_id IN (${placeholders})`,
+    )
+    .get(...accountIds) as { total: number };
+  const currentBalance = balanceRow.total;
 
   // 2. Pull source rows up front. Either honour pre-built sources from the
   //    caller (e.g. the /what-if scenario engine) or pull fresh from the DB.
-  //    Recurring streams are scoped to the requested account; manual bills
-  //    are taken in full (per the spec). Loaded before the cycle boundaries
-  //    because the inflow streams supply the salary anchor below.
+  //    Recurring streams are scoped to the account set; manual bills are taken
+  //    in full (per the spec). Loaded before the cycle boundaries because the
+  //    inflow streams supply the salary anchor below.
   const { inflowRows, outflowRows, manualRows } =
-    options.sources ?? loadForecastSources(accountId);
+    options.sources ?? loadForecastSources(accountIds);
 
   // 3. Cycle boundaries — anchored to the most recent biweekly salary deposit
   //    so every cycle runs payday -> next-payday-1, including cycle 1. Falls
@@ -188,7 +201,7 @@ export function forecastBalance(options: ForecastOptions): ForecastResult {
 
   if (boundaries.length === 0) {
     return {
-      accountId,
+      accountId: accountLabel,
       currentBalance,
       cycles: [],
       lowestPoint: {
@@ -308,26 +321,28 @@ export function forecastBalance(options: ForecastOptions): ForecastResult {
     };
   });
 
-  return { accountId, currentBalance, cycles, lowestPoint, cycleAdjustment };
+  return { accountId: accountLabel, currentBalance, cycles, lowestPoint, cycleAdjustment };
 }
 
 /**
- * Pull the same source rows the in-line forecast would. Exposed so the
+ * Pull the same source rows the in-line forecast would, scoped to one or more
+ * accounts (streams from every listed account are pooled). Exposed so the
  * /what-if scenario engine can fetch, mutate, and re-feed them without
  * round-tripping through the DB twice.
  */
-export function loadForecastSources(accountId: string): ForecastSources {
+export function loadForecastSources(accountIds: string[]): ForecastSources {
   const db = getDb();
+  const placeholders = accountIds.map(() => "?").join(", ");
   const inflowRows = db
     .prepare(
       `SELECT stream_id, description, merchant_name, frequency, avg_amount, last_amount, last_date
          FROM recurring
         WHERE is_active = 1
           AND stream_type = 'inflow'
-          AND account_id = ?
+          AND account_id IN (${placeholders})
           AND last_date IS NOT NULL`,
     )
-    .all(accountId) as RecurringRow[];
+    .all(...accountIds) as RecurringRow[];
 
   const outflowRows = db
     .prepare(
@@ -335,10 +350,10 @@ export function loadForecastSources(accountId: string): ForecastSources {
          FROM recurring
         WHERE is_active = 1
           AND stream_type = 'outflow'
-          AND account_id = ?
+          AND account_id IN (${placeholders})
           AND last_date IS NOT NULL`,
     )
-    .all(accountId) as RecurringRow[];
+    .all(...accountIds) as RecurringRow[];
 
   const manualRows = db
     .prepare(
