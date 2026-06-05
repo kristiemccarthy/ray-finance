@@ -157,12 +157,22 @@ export function forecastBalance(options: ForecastOptions): ForecastResult {
     currentBalance = 0;
   }
 
-  // 2. Cycle boundaries — cycle 1 starts today so we don't lose visibility
-  //    on bills that fall before the next anchor; cycles 2+ align to the
-  //    anchor so the rest of the forecast lands on real paydays.
+  // 2. Pull source rows up front. Either honour pre-built sources from the
+  //    caller (e.g. the /what-if scenario engine) or pull fresh from the DB.
+  //    Recurring streams are scoped to the requested account; manual bills
+  //    are taken in full (per the spec). Loaded before the cycle boundaries
+  //    because the inflow streams supply the salary anchor below.
+  const { inflowRows, outflowRows, manualRows } =
+    options.sources ?? loadForecastSources(accountId);
+
+  // 3. Cycle boundaries — anchored to the most recent biweekly salary deposit
+  //    so every cycle runs payday -> next-payday-1, including cycle 1. Falls
+  //    back to day-of-week arithmetic when no biweekly inflow is detected.
   const today = startOfUtcDay(new Date());
+  const salaryAnchor = resolveSalaryAnchor(inflowRows);
   const boundaries = computeCycleBoundaries(
     today,
+    salaryAnchor,
     cycleAnchorDayOfWeek,
     cycleLengthDays,
     numberOfCycles,
@@ -192,13 +202,6 @@ export function forecastBalance(options: ForecastOptions): ForecastResult {
 
   const windowStart = parseYMD(boundaries[0].startDate);
   const windowEnd = parseYMD(boundaries[boundaries.length - 1].endDate);
-
-  // 3. Pull source rows. Either honour pre-built sources from the caller
-  //    (e.g. the /what-if scenario engine) or pull fresh from the DB.
-  //    Recurring streams are scoped to the requested account; manual bills
-  //    are taken in full (per the spec).
-  const { inflowRows, outflowRows, manualRows } =
-    options.sources ?? loadForecastSources(accountId);
 
   // 4. Project each source across the full window once, then bucket by cycle.
   const allIncome = projectRecurringStreams(inflowRows, windowStart, windowEnd);
@@ -365,33 +368,60 @@ interface CycleBoundary {
 }
 
 /**
- * Cycle 1 starts today and runs until the day before cycle 2 begins. Cycle 2
- * starts on the first anchor day on or after `today + cycleLength`, which
- * keeps subsequent cycles aligned to real paydays while guaranteeing cycle 1
- * is at least one full cycle long. With `cycleLength = 14` and a weekly
- * anchor, cycle 1 ends up between 14 and 20 days; cycles 2+ are exactly
- * `cycleLength` days each. End dates are inclusive.
+ * Resolve the salary anchor: the `last_date` of the largest biweekly inflow
+ * stream. Salary dwarfs other repeat inflows (personal payments, card
+ * top-ups), so ordering by amount picks the real paycheck rather than whatever
+ * biweekly inflow happened to land most recently. Returns null when no
+ * biweekly inflow is on file, signalling the caller to use the dow fallback.
+ *
+ * Mirrors the anchor logic in /fortnight, /retrospective, and /goals.
+ */
+function resolveSalaryAnchor(inflowRows: RecurringRow[]): string | null {
+  let best: RecurringRow | null = null;
+  for (const row of inflowRows) {
+    if (row.frequency !== "BIWEEKLY" || !row.last_date) continue;
+    if (!best || row.avg_amount > best.avg_amount) best = row;
+  }
+  return best ? best.last_date : null;
+}
+
+/**
+ * Build `numCycles` consecutive pay cycles, each exactly `cycleLength` days,
+ * running payday -> next-payday-1 (end dates inclusive).
+ *
+ * When a salary anchor is supplied, cycle 1 starts at the most recent payday
+ * on or before today (walking the anchor forward in `cycleLength`-day steps),
+ * so every boundary lands on a real payday — including cycle 1, which is now a
+ * full cycle rather than a 14-20 day stub.
+ *
+ * Fallback (no biweekly inflow detected): start cycle 1 at the most recent
+ * `anchorDow` day-of-week on or before today, keeping behaviour sensible for
+ * accounts without a known salary stream.
  */
 function computeCycleBoundaries(
   today: Date,
+  salaryAnchor: string | null,
   anchorDow: number,
   cycleLength: number,
   numCycles: number,
 ): CycleBoundary[] {
-  const cycle2Target = new Date(today.getTime() + cycleLength * MS_PER_DAY);
-  const targetDow = cycle2Target.getUTCDay();
-  const daysToAnchor = (anchorDow - targetDow + 7) % 7;
-  const cycle2Start = new Date(cycle2Target.getTime() + daysToAnchor * MS_PER_DAY);
+  let cycleStart: Date;
+  if (salaryAnchor) {
+    let d = parseYMD(salaryAnchor);
+    // Walk forward in `cycleLength`-day steps to the most recent payday <= today.
+    while (d.getTime() + cycleLength * MS_PER_DAY <= today.getTime()) {
+      d = new Date(d.getTime() + cycleLength * MS_PER_DAY);
+    }
+    cycleStart = d;
+  } else {
+    const todayDow = today.getUTCDay();
+    const daysBack = (todayDow - anchorDow + 7) % 7;
+    cycleStart = new Date(today.getTime() - daysBack * MS_PER_DAY);
+  }
 
   const boundaries: CycleBoundary[] = [];
-  if (numCycles >= 1) {
-    boundaries.push({
-      startDate: toYMD(today),
-      endDate: toYMD(new Date(cycle2Start.getTime() - MS_PER_DAY)),
-    });
-  }
-  for (let i = 1; i < numCycles; i++) {
-    const start = new Date(cycle2Start.getTime() + (i - 1) * cycleLength * MS_PER_DAY);
+  for (let i = 0; i < numCycles; i++) {
+    const start = new Date(cycleStart.getTime() + i * cycleLength * MS_PER_DAY);
     const end = new Date(start.getTime() + (cycleLength - 1) * MS_PER_DAY);
     boundaries.push({ startDate: toYMD(start), endDate: toYMD(end) });
   }
