@@ -195,13 +195,53 @@ export function replacePending(rows: PendingTransaction[]): void {
 /**
  * Aggregate sum + count for the fortnight view. Returns zeros when the
  * table is empty (sum of an empty set is NULL → coalesced to 0).
+ *
+ * When `startDate`/`endDate` (YYYY-MM-DD) are supplied, the summary is scoped
+ * to pending rows whose `date` falls within that inclusive range — used by the
+ * fortnight view so pending from outside the current cycle doesn't leak into
+ * its totals. Called without arguments, it sums the whole table as before.
  */
-export function getPendingSummary(): PendingSummary {
+export function getPendingSummary(
+  startDate?: string,
+  endDate?: string,
+): PendingSummary {
   const db = getDb();
-  const row = db
-    .prepare(
-      `SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count FROM pending_transactions`,
-    )
-    .get() as { total: number; count: number };
+  const scoped = startDate !== undefined && endDate !== undefined;
+  const row = (
+    scoped
+      ? db
+          .prepare(
+            `SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count
+               FROM pending_transactions
+              WHERE date >= ? AND date <= ?`,
+          )
+          .get(startDate, endDate)
+      : db
+          .prepare(
+            `SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count FROM pending_transactions`,
+          )
+          .get()
+  ) as { total: number; count: number };
   return { total: row.total, count: row.count };
+}
+
+/**
+ * Return the in-cycle pending rows themselves (not just the aggregate), so
+ * callers can categorise them at query time and fold them into per-category
+ * totals. Scoped to the inclusive `startDate`..`endDate` range — same WHERE
+ * clause as the date-scoped `getPendingSummary`.
+ */
+export function getPendingForCycle(
+  startDate: string,
+  endDate: string,
+): PendingTransaction[] {
+  const db = getDb();
+  return db
+    .prepare(
+      `SELECT description, amount, date
+         FROM pending_transactions
+        WHERE date >= ? AND date <= ?
+        ORDER BY date`,
+    )
+    .all(startDate, endDate) as PendingTransaction[];
 }

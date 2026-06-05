@@ -1,6 +1,11 @@
 import Link from "next/link";
 import { getDb } from "@ray/db/connection";
-import { getPendingSummary } from "@ray/pending";
+import { getPendingSummary, getPendingForCycle } from "@ray/pending";
+import {
+  categoriseWithRules,
+  loadCategoryOverrides,
+  DEFAULT_CATEGORY,
+} from "@ray/csv-import/categoriser";
 
 export const dynamic = "force-dynamic";
 
@@ -187,6 +192,48 @@ function loadCategoryStatuses(
     totalsByCategory.set(row.category, row.total);
   }
 
+  const budgetCategorySet = new Set(budgets.map((b) => b.category));
+  // Family of categories that aren't real outgoing spend — mirrors the
+  // settled "Other" query's exclusions below.
+  const NON_SPEND = new Set([
+    "TRANSFER_IN",
+    "TRANSFER_OUT",
+    "INCOME",
+    "LOAN_PAYMENTS",
+  ]);
+
+  // Settled-only budgeted total, captured before folding pending in, so the
+  // "Other" maths can subtract the right (settled) figure from the settled
+  // all-outflows query.
+  let settledBudgetedTotal = 0;
+  for (const b of budgets) settledBudgetedTotal += totalsByCategory.get(b.category) ?? 0;
+
+  // Fold in-cycle pending into the per-category totals. Pending rows carry no
+  // stored category, so we categorise each at query time with Ray's existing
+  // categoriser (PFC description rules + user overrides). Same outflow filters
+  // as the settled queries: positive amounts only, transfers/income excluded.
+  // Budgeted categories flow into their cards; everything else accrues into a
+  // pending "Other" bucket added to the settled "Other" below.
+  const rules = loadCategoryOverrides();
+  const pendingRows = getPendingForCycle(cycle.startDate, cycle.endDate);
+  let pendingOther = 0;
+  for (const row of pendingRows) {
+    if (row.amount <= 0) continue;
+    const result = categoriseWithRules(
+      row.description,
+      row.description,
+      rules,
+      row.amount,
+    );
+    const category = result?.category ?? DEFAULT_CATEGORY.category;
+    if (NON_SPEND.has(category)) continue;
+    if (budgetCategorySet.has(category)) {
+      totalsByCategory.set(category, (totalsByCategory.get(category) ?? 0) + row.amount);
+    } else {
+      pendingOther += row.amount;
+    }
+  }
+
   const categories: CategoryStatus[] = budgets.map((b) => {
     const spent = totalsByCategory.get(b.category) ?? 0;
     const fortnightTarget = b.monthly_limit / CYCLES_PER_MONTH;
@@ -206,7 +253,6 @@ function loadCategoryStatuses(
   // "Other" = everything else that's a real outgoing spend in the cycle. Skip
   // transfers (between own accounts) and INCOME (sign quirks); everything
   // else is fair game and matches the footer caveat about including bills.
-  const budgetCategorySet = new Set(budgets.map((b) => b.category));
   const allOutflows = db
     .prepare(
       `SELECT COALESCE(SUM(amount), 0) AS total
@@ -218,8 +264,11 @@ function loadCategoryStatuses(
     )
     .get(cycle.startDate, cycle.endDate) as { total: number };
 
-  const categorisedTotal = categories.reduce((s, c) => s + c.spent, 0);
-  const other = Math.max(0, allOutflows.total - categorisedTotal);
+  // Settled non-budgeted spend, plus the pending non-budgeted spend folded in
+  // above. Subtract the *settled* budgeted total (not the now-pending-inclusive
+  // card totals) so pending budgeted spend isn't double-counted out of "Other".
+  const settledOther = Math.max(0, allOutflows.total - settledBudgetedTotal);
+  const other = settledOther + pendingOther;
 
   return { categories, other };
 }
@@ -272,8 +321,13 @@ export default function FortnightPage() {
   const cycle = computeCurrentCycle(today);
   const { categories, other } = loadCategoryStatuses(cycle);
   const billsPaid = loadBillsPaid(cycle);
-  const pending = getPendingSummary();
+  // Scope pending to the current cycle so stale pending from a prior cycle
+  // doesn't leak into this fortnight's totals.
+  const pending = getPendingSummary(cycle.startDate, cycle.endDate);
 
+  // Category cards now fold in-cycle pending into their spent totals (see
+  // loadCategoryStatuses), so the summed card total is authoritative for the
+  // headline — settled + pending in one figure, no separate pending add-on.
   const totalSpent = categories.reduce((s, c) => s + c.spent, 0);
   const totalFortnightTarget = categories.reduce(
     (s, c) => s + c.fortnightTarget,
@@ -295,19 +349,6 @@ export default function FortnightPage() {
           This Fortnight
         </h1>
 
-        {pending.total > 0 && (
-          <p className="mt-3 text-center">
-            <Link
-              href="/"
-              className="text-xs tabular-nums text-neutral-500 underline-offset-2 hover:text-neutral-800 hover:underline"
-            >
-              Pending: {moneyFormatter.format(pending.total)} across{" "}
-              {pending.count}{" "}
-              {pending.count === 1 ? "transaction" : "transactions"}
-            </Link>
-          </p>
-        )}
-
         <section className="mt-12 mb-14 text-center">
           <div className="text-sm text-neutral-500">
             Day {cycle.dayOfCycle} of {CYCLE_LENGTH_DAYS}
@@ -327,6 +368,19 @@ export default function FortnightPage() {
           <div className="mt-2 text-sm text-neutral-500 tabular-nums">
             {moneyFormatter.format(totalSpent)} spent so far
           </div>
+          {pending.total > 0 && (
+            <div className="mt-1 text-xs text-neutral-500 tabular-nums">
+              of which{" "}
+              <Link
+                href="/"
+                className="underline-offset-2 hover:text-neutral-800 hover:underline"
+              >
+                {moneyFormatter.format(pending.total)} is still pending across{" "}
+                {pending.count}{" "}
+                {pending.count === 1 ? "transaction" : "transactions"}
+              </Link>
+            </div>
+          )}
           <div className={`mt-3 text-sm font-medium ${STATUS_TEXT[totalStatus]}`}>
             {paceMoney(totalVariance)}{" "}
             {totalVariance >= 0 ? "over" : "under"} pace
