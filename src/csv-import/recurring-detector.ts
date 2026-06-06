@@ -282,6 +282,11 @@ const STREAM_EXCLUSIONS: readonly string[] = [
   "AUDIBLE",
   "FARMERS LAND ROUSE H",
   "PYPL PAYIN4",
+
+  // Cancelled subscriptions — kept here so the detector doesn't re-activate a
+  // stream that's still within its stale window. Remove the entry if the user
+  // ever resubscribes.
+  "LEONARDO", // user-cancelled 2026-06-06 (matches "Leonardo.ai" and raw "PAYPAL *LEONARDOINT")
 ];
 
 /**
