@@ -42,31 +42,29 @@ export function deriveAccountId(config: ImportConfig): string {
 
 /**
  * Build a stable transaction identifier from the row's content. We hash
- * `accountId|date|amount|balance` so a row's identity is fixed by the
- * bank's own statement: the same row from the same statement always
- * hashes the same way, regardless of how its description is later
- * rewritten.
+ * `accountId|date|amount|ordinal|raw_description` so a row's identity is
+ * fixed by fields that survive re-imports without drifting.
  *
- * Choice of `balance` over `description`: aliases mutate `description`
- * over time (a merchant rename in the alias map rewrites every prior
- * row's display name), which previously caused alias edits to orphan
- * every affected row — the new ID didn't match the old one and `ON
- * CONFLICT DO UPDATE` saw a new insert instead of an update. `balance`
- * is the bank's post-transaction running balance: stable per row across
- * re-imports, never touched by Ray.
+ * Why these fields:
+ *  - **`raw_description`** (not `description`): aliases mutate
+ *    `description`/`name` over time — a merchant rename in the alias map
+ *    rewrites every prior row's display name. Hashing the raw, pre-alias
+ *    bank descriptor keeps a row's identity stable across alias edits.
+ *  - **`ordinal`**: the 1-based count of earlier rows in the same file
+ *    sharing this `(date, amount, raw_description)`. This is what lets two
+ *    genuine same-day, same-amount, same-merchant purchases stay distinct
+ *    (ordinal 1 and 2) while remaining reproducible on re-import.
  *
- * Known limitations:
- *  - **Null balance.** Some sources may omit the running balance. The
- *    `NULL` fallback in `balanceForHash` collapses two same-day,
- *    same-amount rows with no balance into a single ID. Both currently
- *    supported parsers (St George CSV, AccessPay PDF) always populate
- *    `balance`, so this is a theoretical risk only — flagged for the
- *    next source that might not.
- *  - **Retroactive balance correction.** If the bank reissues a
- *    statement with the running balance recomputed (e.g. after a
- *    back-dated chargeback), every subsequent row's hash changes and
- *    re-importing that CSV creates a duplicate set of rows. Rare in
- *    practice and accepted as the trade-off for alias-edit safety.
+ * Why NOT `balance`: the bank's running balance is recomputed whenever a
+ * statement is reissued (pending items settling, back-dated corrections),
+ * so it drifted between exports and re-imports minted duplicate rows. The
+ * `(date, amount, raw_description)` ordinal replaces it: a given day's
+ * rows are fully present in any statement covering that day, so the Nth
+ * occurrence of a key on a day is identical across overlapping exports.
+ *
+ * Field ordering keeps the single free-text field (`raw_description`)
+ * trailing, so a stray `|` inside a descriptor can't create field
+ * ambiguity — there are no further fields to confuse it with.
  *
  * Truncation to 32 hex chars (~128 bits) is plenty of entropy for a
  * single user's transaction history.
@@ -74,20 +72,16 @@ export function deriveAccountId(config: ImportConfig): string {
 export function deriveTransactionId(
   accountId: string,
   row: ImportedRow,
+  ordinal: number,
 ): string {
-  const input = `${accountId}|${row.date}|${row.amount.toFixed(2)}|${balanceForHash(row.balance)}`;
+  const input = [
+    accountId,
+    row.date,
+    row.amount.toFixed(2),
+    ordinal,
+    row.raw_description,
+  ].join("|");
   return createHash("sha256").update(input).digest("hex").slice(0, 32);
-}
-
-/**
- * Format `balance` for inclusion in the transaction-id hash. `null` is
- * encoded as the literal `"NULL"` so the hash input remains a stable
- * string. See the collision note on `deriveTransactionId` — this is the
- * source of the null-balance limitation called out there.
- */
-function balanceForHash(balance: number | null): string {
-  if (balance === null) return "NULL";
-  return balance.toFixed(2);
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +172,14 @@ export function mapTransactionRowFromImported(
    * doesn't re-query.
    */
   rules: CategoryOverride[] = [],
+  /**
+   * 1-based count of earlier rows in the same file sharing this row's
+   * `(date, amount, raw_description)`. Feeds `deriveTransactionId` so
+   * genuine same-day repeat purchases get distinct, re-import-stable IDs.
+   * Defaults to 1 — a lone occurrence — so existing direct callers and
+   * tests that don't care about repeats keep working.
+   */
+  ordinal: number = 1,
 ): TransactionRow {
   // Pass both the alias-applied description (post `DESCRIPTION_ALIASES`
   // in the parser) and the raw bank descriptor through to the categoriser
@@ -200,7 +202,7 @@ export function mapTransactionRowFromImported(
     matched?.flowType ?? inferFlowType(category, row.amount);
 
   return {
-    transaction_id: deriveTransactionId(accountId, row),
+    transaction_id: deriveTransactionId(accountId, row, ordinal),
     account_id: accountId,
     amount: row.amount,
     date: row.date,

@@ -107,9 +107,25 @@ export async function runImport(config: ImportConfig): Promise<ImportResult> {
   // Load category-override rules once per import so the per-row hot path
   // doesn't re-query.
   const categoryRules = loadCategoryOverrides();
-  const transactionRows = rows.map((row) =>
-    mapTransactionRowFromImported(row, accountId, config.currency, categoryRules),
-  );
+  // Assign each row a 1-based ordinal: the count of earlier rows in this
+  // file sharing the same (date, amount, raw_description). Parsers preserve
+  // source file order, and a given day's rows are fully present in any
+  // statement covering that day, so the Nth occurrence of a key is stable
+  // across re-imports and overlapping exports. This is what feeds
+  // `deriveTransactionId` in place of the (drift-prone) running balance.
+  const ordinalCounts = new Map<string, number>();
+  const transactionRows = rows.map((row) => {
+    const key = `${row.date}|${row.amount.toFixed(2)}|${row.raw_description}`;
+    const ordinal = (ordinalCounts.get(key) ?? 0) + 1;
+    ordinalCounts.set(key, ordinal);
+    return mapTransactionRowFromImported(
+      row,
+      accountId,
+      config.currency,
+      categoryRules,
+      ordinal,
+    );
+  });
   const transactionIds = transactionRows.map((r) => r.transaction_id);
   const existingTransactionIds = selectExistingTransactionIds(db, transactionIds);
 
