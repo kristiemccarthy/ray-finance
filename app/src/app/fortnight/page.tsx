@@ -6,12 +6,15 @@ import {
   loadCategoryOverrides,
   DEFAULT_CATEGORY,
 } from "@ray/csv-import/categoriser";
+import {
+  CYCLE_LENGTH_DAYS,
+  resolveSalaryAnchor,
+  resolveCurrentCycleStart,
+} from "@ray/cycles";
 
 export const dynamic = "force-dynamic";
 
 const MS_PER_DAY = 86_400_000;
-const ANCHOR_DOW = 3; // Wednesday — salary lands fortnightly on this day.
-const CYCLE_LENGTH_DAYS = 14;
 // 30.44 days / 14 = 2.174 cycles per average month. Matches balance-forecast.
 const CYCLES_PER_MONTH = 2.17;
 
@@ -62,48 +65,17 @@ function toYMD(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
-function parseYMD(s: string): Date {
-  return new Date(s + "T00:00:00Z");
-}
-
 /**
  * Anchor the current cycle to the most recent actual salary deposit so the
  * 14-day window lines up with the fortnightly pay rhythm rather than just
  * "the most recent Wednesday" (which could land mid-cycle for fortnightly
- * pay). Falls back to dow-3 arithmetic if no inflow stream is on file.
+ * pay). The shared resolver applies the +1 day post-payday offset, so the
+ * cycle runs payday+1 -> next-payday. Falls back to day-of-week arithmetic
+ * if no inflow stream is on file.
  */
 function computeCurrentCycle(today: Date): Cycle {
   const db = getDb();
-  // Filter to fortnightly inflows and pick the largest by avg_amount — salary
-  // dwarfs other repeat inflows (personal payments, card top-ups). Ordering by
-  // `last_date` would pick whichever fortnightly inflow happened to land most
-  // recently, which is often not the actual paycheck.
-  const salaryRow = db
-    .prepare(
-      `SELECT last_date
-         FROM recurring
-        WHERE is_active = 1
-          AND stream_type = 'inflow'
-          AND last_date IS NOT NULL
-          AND frequency = 'BIWEEKLY'
-        ORDER BY avg_amount DESC
-        LIMIT 1`,
-    )
-    .get() as { last_date: string } | undefined;
-
-  let cycleStart: Date;
-  if (salaryRow?.last_date) {
-    let d = parseYMD(salaryRow.last_date);
-    // Walk forward in 14-day steps to the most recent anchor <= today.
-    while (d.getTime() + CYCLE_LENGTH_DAYS * MS_PER_DAY <= today.getTime()) {
-      d = new Date(d.getTime() + CYCLE_LENGTH_DAYS * MS_PER_DAY);
-    }
-    cycleStart = d;
-  } else {
-    const todayDow = today.getUTCDay();
-    const daysBack = (todayDow - ANCHOR_DOW + 7) % 7;
-    cycleStart = new Date(today.getTime() - daysBack * MS_PER_DAY);
-  }
+  const cycleStart = resolveCurrentCycleStart(today, resolveSalaryAnchor(db));
 
   const cycleEnd = new Date(
     cycleStart.getTime() + (CYCLE_LENGTH_DAYS - 1) * MS_PER_DAY,

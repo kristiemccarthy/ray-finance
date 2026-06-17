@@ -15,6 +15,11 @@
 // ---------------------------------------------------------------------------
 
 import { getDb } from "../db/connection.js";
+import {
+  CYCLE_LENGTH_DAYS,
+  resolveSalaryAnchor,
+  resolveCurrentCycleStart,
+} from "../cycles/index.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -98,15 +103,9 @@ export interface RetrospectiveData {
 // ---------------------------------------------------------------------------
 
 const MS_PER_DAY = 86_400_000;
-const CYCLE_LENGTH_DAYS = 14;
-const ANCHOR_DOW = 3;
 
 function toYMD(d: Date): string {
   return d.toISOString().slice(0, 10);
-}
-
-function parseYMD(s: string): Date {
-  return new Date(s + "T00:00:00Z");
 }
 
 function startOfUtcDay(d: Date): Date {
@@ -160,38 +159,17 @@ function getCompletedMonths(today: Date, count: number): PeriodWindow[] {
 
 /**
  * Most recent N completed pay cycles, anchored to the latest fortnightly
- * salary inflow on file. The cycle containing `today` is in-progress and
- * is skipped — position 0 is the one that ended right before today.
- * Returns null when no anchor is available AND the dow-fallback can't
- * place a starting cycle (effectively never — fallback always succeeds).
+ * salary inflow on file. Cycles run payday+1 -> next-payday (via the shared
+ * resolver's +1 offset). The cycle containing `today` is in-progress and is
+ * skipped — position 0 is the one that ended right before today. The
+ * day-of-week fallback always succeeds, so this never returns empty.
  */
 function getCompletedCycles(today: Date, count: number): PeriodWindow[] {
   const db = getDb();
-  const salaryRow = db
-    .prepare(
-      `SELECT last_date
-         FROM recurring
-        WHERE is_active = 1
-          AND stream_type = 'inflow'
-          AND last_date IS NOT NULL
-          AND frequency = 'BIWEEKLY'
-        ORDER BY avg_amount DESC
-        LIMIT 1`,
-    )
-    .get() as { last_date: string } | undefined;
-
-  let currentCycleStart: Date;
-  if (salaryRow?.last_date) {
-    let d = parseYMD(salaryRow.last_date);
-    while (d.getTime() + CYCLE_LENGTH_DAYS * MS_PER_DAY <= today.getTime()) {
-      d = new Date(d.getTime() + CYCLE_LENGTH_DAYS * MS_PER_DAY);
-    }
-    currentCycleStart = d;
-  } else {
-    const todayDow = today.getUTCDay();
-    const daysBack = (todayDow - ANCHOR_DOW + 7) % 7;
-    currentCycleStart = new Date(today.getTime() - daysBack * MS_PER_DAY);
-  }
+  const currentCycleStart = resolveCurrentCycleStart(
+    today,
+    resolveSalaryAnchor(db),
+  );
 
   const result: PeriodWindow[] = [];
   for (let i = 1; i <= count; i++) {

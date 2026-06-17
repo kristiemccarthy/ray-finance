@@ -25,6 +25,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { getDb } from "../db/connection.js";
 import { predictNextBillDate, isOccurrencePaid, addMonths } from "../db/bills.js";
+import { resolveCurrentCycleStart } from "../cycles/index.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -402,16 +403,13 @@ function resolveSalaryAnchor(inflowRows: RecurringRow[]): string | null {
 
 /**
  * Build `numCycles` consecutive pay cycles, each exactly `cycleLength` days,
- * running payday -> next-payday-1 (end dates inclusive).
+ * running payday+1 -> next-payday (end dates inclusive).
  *
- * When a salary anchor is supplied, cycle 1 starts at the most recent payday
- * on or before today (walking the anchor forward in `cycleLength`-day steps),
- * so every boundary lands on a real payday — including cycle 1, which is now a
- * full cycle rather than a 14-20 day stub.
- *
- * Fallback (no biweekly inflow detected): start cycle 1 at the most recent
- * `anchorDow` day-of-week on or before today, keeping behaviour sensible for
- * accounts without a known salary stream.
+ * Cycle 1 starts at the current cycle's boundary as resolved by the shared
+ * `resolveCurrentCycleStart` — the day after the most recent payday on or
+ * before today (see the +1 offset in src/cycles). Every boundary therefore
+ * lands the day after a real payday, and cycle 1 is a full cycle rather than a
+ * stub. Falls back to day-of-week arithmetic when no biweekly inflow exists.
  */
 function computeCycleBoundaries(
   today: Date,
@@ -420,19 +418,10 @@ function computeCycleBoundaries(
   cycleLength: number,
   numCycles: number,
 ): CycleBoundary[] {
-  let cycleStart: Date;
-  if (salaryAnchor) {
-    let d = parseYMD(salaryAnchor);
-    // Walk forward in `cycleLength`-day steps to the most recent payday <= today.
-    while (d.getTime() + cycleLength * MS_PER_DAY <= today.getTime()) {
-      d = new Date(d.getTime() + cycleLength * MS_PER_DAY);
-    }
-    cycleStart = d;
-  } else {
-    const todayDow = today.getUTCDay();
-    const daysBack = (todayDow - anchorDow + 7) % 7;
-    cycleStart = new Date(today.getTime() - daysBack * MS_PER_DAY);
-  }
+  const cycleStart = resolveCurrentCycleStart(today, salaryAnchor, {
+    anchorDow,
+    cycleLengthDays: cycleLength,
+  });
 
   const boundaries: CycleBoundary[] = [];
   for (let i = 0; i < numCycles; i++) {

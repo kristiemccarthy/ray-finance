@@ -12,6 +12,11 @@
 // ---------------------------------------------------------------------------
 
 import { getDb } from "../db/connection.js";
+import {
+  CYCLE_LENGTH_DAYS,
+  resolveSalaryAnchor,
+  resolveCurrentCycleStart,
+} from "../cycles/index.js";
 import { predictNextBillDate, addMonths } from "../db/bills.js";
 import { forecastBalance } from "../csv-import/balance-forecast.js";
 
@@ -422,7 +427,6 @@ export function computeGoalStatus(goal: Goal, now: Date = new Date()): GoalStatu
 // ---------------------------------------------------------------------------
 
 const MS_PER_DAY = 86_400_000;
-const CYCLE_LENGTH_DAYS = 14;
 const AVG_DAYS_PER_MONTH = 30.44;
 
 function computeSavingsStatus(goal: Goal, now: Date): GoalStatus {
@@ -909,10 +913,9 @@ function manualPredictedThisMonth(
 }
 
 // ---------------------------------------------------------------------------
-// Pay-cycle resolution — mirrors /fortnight's anchor logic
+// Pay-cycle resolution — delegates to the shared resolver (src/cycles), which
+// applies the +1 day post-payday offset so cycles run payday+1 -> next-payday.
 // ---------------------------------------------------------------------------
-
-const ANCHOR_DOW = 3;
 
 interface Cycle {
   startDate: string;
@@ -922,31 +925,7 @@ interface Cycle {
 
 function computeCurrentCycle(today: Date): Cycle {
   const db = getDb();
-  const salaryRow = db
-    .prepare(
-      `SELECT last_date
-         FROM recurring
-        WHERE is_active = 1
-          AND stream_type = 'inflow'
-          AND last_date IS NOT NULL
-          AND frequency = 'BIWEEKLY'
-        ORDER BY avg_amount DESC
-        LIMIT 1`,
-    )
-    .get() as { last_date: string } | undefined;
-
-  let cycleStart: Date;
-  if (salaryRow?.last_date) {
-    let d = parseYMD(salaryRow.last_date);
-    while (d.getTime() + CYCLE_LENGTH_DAYS * MS_PER_DAY <= today.getTime()) {
-      d = new Date(d.getTime() + CYCLE_LENGTH_DAYS * MS_PER_DAY);
-    }
-    cycleStart = d;
-  } else {
-    const todayDow = today.getUTCDay();
-    const daysBack = (todayDow - ANCHOR_DOW + 7) % 7;
-    cycleStart = new Date(today.getTime() - daysBack * MS_PER_DAY);
-  }
+  const cycleStart = resolveCurrentCycleStart(today, resolveSalaryAnchor(db));
 
   const cycleEnd = new Date(
     cycleStart.getTime() + (CYCLE_LENGTH_DAYS - 1) * MS_PER_DAY,
