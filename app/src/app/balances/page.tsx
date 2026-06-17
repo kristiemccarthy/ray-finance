@@ -1,6 +1,18 @@
 import { getDb } from "@ray/db/connection";
+import { getPendingSummary } from "@ray/pending";
 
 export const dynamic = "force-dynamic";
+
+// Pending screenshots today are of the St George Personal (operating) account
+// only, so every row in `pending_transactions` is treated as Personal pending
+// and subtracted from that account's Available balance. Other accounts have no
+// pending, so their Available equals their Balance.
+//
+// Future schema upgrade: when `pending_transactions` gains an `account_id`
+// column, replace this constant + the whole-table `getPendingSummary()` call
+// with a per-account pending lookup keyed on that column. The UI below needs
+// no change — it already renders Available per card.
+const PENDING_ACCOUNT_ID = "csv:st-george:personal";
 
 interface AccountRow {
   account_id: string;
@@ -9,6 +21,14 @@ interface AccountRow {
   current_balance: number | null;
   currency: string | null;
   bank_name: string;
+}
+
+interface AccountView extends AccountRow {
+  balance: number;
+  available: number;
+  /** Whole-table pending applied to this account (0 for non-pending accounts). */
+  pendingTotal: number;
+  pendingCount: number;
 }
 
 const moneyFormatter = new Intl.NumberFormat("en-AU", {
@@ -56,7 +76,25 @@ function loadAccounts(): AccountRow[] {
 
 export default function BalancesPage() {
   const accounts = loadAccounts();
-  const total = accounts.reduce((sum, a) => sum + (a.current_balance ?? 0), 0);
+  // Whole-table pending — all of it belongs to PENDING_ACCOUNT_ID (see note).
+  // Signed sum, so pending refunds (negative) correctly raise Available.
+  const pending = getPendingSummary();
+
+  const views: AccountView[] = accounts.map((a) => {
+    const balance = a.current_balance ?? 0;
+    const isPendingAccount = a.account_id === PENDING_ACCOUNT_ID;
+    return {
+      ...a,
+      balance,
+      available: isPendingAccount ? balance - pending.total : balance,
+      pendingTotal: isPendingAccount ? pending.total : 0,
+      pendingCount: isPendingAccount ? pending.count : 0,
+    };
+  });
+
+  const totalBalance = views.reduce((sum, v) => sum + v.balance, 0);
+  const totalAvailable = views.reduce((sum, v) => sum + v.available, 0);
+  const showHeaderAvailable = pending.total > 0;
 
   return (
     <main className="text-neutral-800">
@@ -67,12 +105,17 @@ export default function BalancesPage() {
 
         <section className="mb-14 text-center">
           <div className="text-3xl font-semibold tabular-nums text-neutral-900">
-            {moneyFormatter.format(total)}
+            {moneyFormatter.format(totalBalance)}
           </div>
           <div className="mt-2 text-sm text-neutral-500">
             across {accounts.length}{" "}
             {accounts.length === 1 ? "account" : "accounts"}
           </div>
+          {showHeaderAvailable && (
+            <div className="mt-1 text-sm text-neutral-500 tabular-nums">
+              {moneyFormatter.format(totalAvailable)} available
+            </div>
+          )}
         </section>
 
         {accounts.length === 0 ? (
@@ -81,8 +124,8 @@ export default function BalancesPage() {
           </p>
         ) : (
           <ul className="space-y-3">
-            {accounts.map((a) => (
-              <AccountCard key={a.account_id} account={a} />
+            {views.map((v) => (
+              <AccountCard key={v.account_id} account={v} />
             ))}
           </ul>
         )}
@@ -91,8 +134,11 @@ export default function BalancesPage() {
   );
 }
 
-function AccountCard({ account }: { account: AccountRow }) {
-  const balance = account.current_balance ?? 0;
+function AccountCard({ account }: { account: AccountView }) {
+  // Available is only meaningful to show when it diverges from the settled
+  // Balance — i.e. when this account has outstanding pending. Equal accounts
+  // render a single number, matching how the bank presents them.
+  const showAvailable = account.available !== account.balance;
   return (
     <li className="flex items-center justify-between gap-4 rounded-md border border-stone-200 bg-white px-5 py-5">
       <div className="min-w-0 flex-1">
@@ -105,8 +151,22 @@ function AccountCard({ account }: { account: AccountRow }) {
           {purposeLabel(account.subtype)}
         </div>
       </div>
-      <div className="shrink-0 text-xl font-semibold tabular-nums text-neutral-900">
-        {moneyFormatterCents.format(balance)}
+      <div className="shrink-0 text-right">
+        <div className="text-xl font-semibold tabular-nums text-neutral-900">
+          {moneyFormatterCents.format(account.balance)}
+        </div>
+        {showAvailable && (
+          <>
+            <div className="mt-1 text-sm text-neutral-500 tabular-nums">
+              {moneyFormatterCents.format(account.available)} available
+            </div>
+            <div className="mt-0.5 text-xs text-neutral-400 tabular-nums">
+              {moneyFormatterCents.format(account.pendingTotal)} pending across{" "}
+              {account.pendingCount}{" "}
+              {account.pendingCount === 1 ? "transaction" : "transactions"}
+            </div>
+          </>
+        )}
       </div>
     </li>
   );
