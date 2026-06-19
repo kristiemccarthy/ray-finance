@@ -358,6 +358,17 @@ export function migrate(db: Database.Database): void {
     db.exec(`ALTER TABLE liabilities ADD COLUMN ytd_principal_paid REAL`);
   }
 
+  // Migrate: add `kind` to goal_contributions to distinguish real savings
+  // contributions from opening backfills ('opening') and one-time fund
+  // reallocations ('allocation'). Only 'contribution' rows feed the pace
+  // extrapolation; the other kinds still count toward `current` (the funds
+  // ARE in the balance) but must not distort the velocity calculation.
+  // DEFAULT 'contribution' means all existing rows are already correct.
+  const gcCols = db.prepare(`PRAGMA table_info(goal_contributions)`).all() as { name: string }[];
+  if (!gcCols.some(c => c.name === "kind")) {
+    db.exec(`ALTER TABLE goal_contributions ADD COLUMN kind TEXT NOT NULL DEFAULT 'contribution'`);
+  }
+
   // Migrate: add frequency + next_due_date to recurring_bills so bills can
   // be scheduled fortnightly or weekly from a known anchor date instead of
   // being limited to a day-of-month. Existing rows default to 'monthly',

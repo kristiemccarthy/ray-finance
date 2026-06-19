@@ -125,12 +125,15 @@ export interface GoalInput {
   included_bill_ids?: string[] | null;
 }
 
+export type ContributionKind = "contribution" | "opening" | "allocation";
+
 export interface GoalContribution {
   id: number;
   goal_id: number;
   amount: number;
   contribution_date: string;
   note: string | null;
+  kind: ContributionKind;
   created_at: string;
 }
 
@@ -288,7 +291,7 @@ export function listContributions(goalId: number): GoalContribution[] {
   const db = getDb();
   return db
     .prepare(
-      `SELECT id, goal_id, amount, contribution_date, note, created_at
+      `SELECT id, goal_id, amount, contribution_date, note, kind, created_at
          FROM goal_contributions
         WHERE goal_id = ?
         ORDER BY contribution_date DESC, id DESC`,
@@ -301,14 +304,15 @@ export function addContribution(
   amount: number,
   contributionDate: string,
   note: string | null = null,
+  kind: ContributionKind = "contribution",
 ): number {
   const db = getDb();
   const info = db
     .prepare(
-      `INSERT INTO goal_contributions (goal_id, amount, contribution_date, note)
-       VALUES (?, ?, ?, ?)`,
+      `INSERT INTO goal_contributions (goal_id, amount, contribution_date, note, kind)
+       VALUES (?, ?, ?, ?, ?)`,
     )
-    .run(goalId, amount, contributionDate, note);
+    .run(goalId, amount, contributionDate, note, kind);
   return Number(info.lastInsertRowid);
 }
 
@@ -410,6 +414,9 @@ export function listLedgerAccountAllocations(): AccountAllocation[] {
 // ---------------------------------------------------------------------------
 // Status computation — dispatches on goal type
 // ---------------------------------------------------------------------------
+
+// Fortnightly cycle assumption — revisit if extending to monthly/weekly cadences.
+export const MIN_PACE_DAYS = 14;
 
 export function computeGoalStatus(goal: Goal, now: Date = new Date()): GoalStatus {
   switch (goal.type) {
@@ -530,47 +537,60 @@ function computeBalanceSavingsStatus(goal: Goal, now: Date): GoalStatus {
 
 /**
  * Ledger-mode savings: progress comes from the explicit `goal_contributions`
- * log. Projection extrapolates the user's contribution pace forward to the
- * target date (avg-per-day × days remaining). If there are no contributions
- * yet, projection is just `current` so the gap reads as the full target.
+ * log. `current` is the sum of ALL contribution kinds — the total is the
+ * total. Pace extrapolation uses only `kind = 'contribution'` rows; entries
+ * with `kind = 'opening'` (backfilled position) or `kind = 'allocation'`
+ * (one-time reallocation) are excluded so they don't artificially inflate
+ * the velocity estimate.
  */
 function computeLedgerSavingsStatus(goal: Goal, now: Date): GoalStatus {
   const db = getDb();
   const today = startOfUtcDay(now);
   const targetDate = goal.target_date ? parseYMD(goal.target_date) : null;
 
-  // Pull the raw contribution facts in one query so we don't round-trip
-  // for count / sum / earliest separately.
-  const aggRow = db
+  // Total across all kinds — current is the honest ledger balance.
+  const allRow = db
+    .prepare(
+      `SELECT COALESCE(SUM(amount), 0) AS total
+         FROM goal_contributions
+        WHERE goal_id = ?`,
+    )
+    .get(goal.id) as { total: number };
+
+  // Pace-eligible rows only: opening backfills and one-off allocations are
+  // excluded so they don't distort the velocity extrapolation.
+  const paceRow = db
     .prepare(
       `SELECT COALESCE(SUM(amount), 0) AS total,
               COUNT(*) AS count,
               MIN(contribution_date) AS first_date
          FROM goal_contributions
-        WHERE goal_id = ?`,
+        WHERE goal_id = ? AND kind = 'contribution'`,
     )
     .get(goal.id) as { total: number; count: number; first_date: string | null };
 
-  const current = aggRow.total;
-  const contributionCount = aggRow.count;
+  const current = allRow.total;
+  const paceSum = paceRow.total;
+  const paceCount = paceRow.count;
 
+  // Anchor daysSinceFirst at the first pace-eligible contribution so an
+  // earlier opening entry doesn't stretch the velocity window.
   let daysSinceFirst = 0;
-  if (aggRow.first_date) {
-    const first = parseYMD(aggRow.first_date);
+  if (paceRow.first_date) {
+    const first = parseYMD(paceRow.first_date);
     daysSinceFirst = Math.max(
       0,
       Math.floor((today.getTime() - first.getTime()) / MS_PER_DAY),
     );
   }
 
-  const avgPerContribution =
-    contributionCount > 0 ? current / contributionCount : 0;
+  const avgPerContribution = paceCount > 0 ? paceSum / paceCount : 0;
 
-  // Avg per day uses days-since-first so a single same-day contribution
-  // doesn't get projected as the full daily rate forever. We need at least
-  // one elapsed day of history before extrapolating a pace.
-  const avgPerDay =
-    daysSinceFirst > 0 && current > 0 ? current / daysSinceFirst : 0;
+  // Require at least MIN_PACE_DAYS of history before extrapolating from a
+  // single entry; two or more entries are trusted regardless of elapsed time.
+  const hasSufficientPace =
+    paceCount >= 2 || (paceCount === 1 && daysSinceFirst >= MIN_PACE_DAYS);
+  const avgPerDay = hasSufficientPace ? paceSum / daysSinceFirst : 0;
 
   let daysRemaining = 0;
   let monthsToTarget = 0;
@@ -581,10 +601,7 @@ function computeLedgerSavingsStatus(goal: Goal, now: Date): GoalStatus {
     monthsToTarget = daysRemaining / AVG_DAYS_PER_MONTH;
   }
 
-  const projected =
-    contributionCount === 0 || avgPerDay === 0
-      ? current
-      : current + avgPerDay * daysRemaining;
+  const projected = avgPerDay === 0 ? current : current + avgPerDay * daysRemaining;
 
   const gapToTarget = goal.target_amount - projected;
   const requiredMonthlyToHit =
@@ -620,7 +637,7 @@ function computeLedgerSavingsStatus(goal: Goal, now: Date): GoalStatus {
       gapToTarget,
       monthsToTarget,
       savingsRateNeededMonthly,
-      contributionCount,
+      contributionCount: paceCount,
       daysSinceFirst,
       avgPerContribution,
       requiredMonthlyToHit,

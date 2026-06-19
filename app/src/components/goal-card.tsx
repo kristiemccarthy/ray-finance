@@ -1,6 +1,7 @@
 import Link from "next/link";
 import {
   computeGoalStatus,
+  MIN_PACE_DAYS,
   type CategoryCapDetails,
   type Goal,
   type GoalContribution,
@@ -273,6 +274,12 @@ function LedgerSavingsBody({
   const pct = Math.round(Math.max(0, Math.min(1, status.progress)) * 100);
   const projectedAboveTarget = status.projected >= goal.target_amount;
 
+  // Pace is reliable with 2+ contributions, or 1 contribution that's at
+  // least MIN_PACE_DAYS old — mirroring the logic in computeLedgerSavingsStatus.
+  const paceEstablished =
+    details.contributionCount >= 2 ||
+    (details.contributionCount === 1 && details.daysSinceFirst >= MIN_PACE_DAYS);
+
   // Sparkline: cumulative contribution growth, plus a final projected point
   // and a dashed target line. Sort ascending by date for a left-to-right
   // trajectory; ties broken by id ascending so same-day contributions land
@@ -323,7 +330,7 @@ function LedgerSavingsBody({
           <span className="text-xs text-neutral-400">(informational)</span>
         </div>
       )}
-      {details.contributionCount > 0 ? (
+      {paceEstablished ? (
         <div className="text-sm text-neutral-600">
           {details.contributionCount}{" "}
           {details.contributionCount === 1 ? "contribution" : "contributions"}{" "}
@@ -334,12 +341,25 @@ function LedgerSavingsBody({
           </span>
           /contribution
         </div>
+      ) : details.contributionCount > 0 ? (
+        <div className="text-sm text-amber-700">
+          Pace not yet established.{" "}
+          {details.requiredMonthlyToHit > 0 && (
+            <>
+              Needs{" "}
+              <span className="font-medium tabular-nums">
+                {moneyFormatter.format(details.requiredMonthlyToHit)}/month
+              </span>{" "}
+              to hit target by deadline.
+            </>
+          )}
+        </div>
       ) : (
         <div className="text-sm text-neutral-500">
           No contributions yet — log your first one below.
         </div>
       )}
-      {!projectedAboveTarget && details.requiredMonthlyToHit > 0 && (
+      {paceEstablished && !projectedAboveTarget && details.requiredMonthlyToHit > 0 && (
         <div className="text-sm text-neutral-600">
           Required pace:{" "}
           <span className="font-medium text-neutral-800 tabular-nums">
@@ -396,6 +416,11 @@ function ContributionsList({
               new Date(c.contribution_date + "T00:00:00Z"),
             )}
           </span>
+          {c.kind !== "contribution" && (
+            <span className="shrink-0 rounded-full bg-neutral-100 px-1.5 py-0.5 text-[10px] text-neutral-500">
+              {c.kind}
+            </span>
+          )}
           <span className="flex-1 truncate text-neutral-700">
             {c.note ?? <span className="text-neutral-400">No note</span>}
           </span>
