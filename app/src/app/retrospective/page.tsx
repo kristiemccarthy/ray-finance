@@ -25,6 +25,7 @@ const CATEGORY_LABELS: Record<RetrospectiveCategoryKey, string> = {
   GENERAL_MERCHANDISE: "Shopping",
   ENTERTAINMENT: "Entertainment",
   ALCOHOL: "Alcohol",
+  VAPE: "Vapes",
   PET_CARE: "Pet Care",
   BILLS: "Bills",
   OTHER: "Other",

@@ -33,6 +33,7 @@ export type RetrospectiveCategoryKey =
   | "GENERAL_MERCHANDISE"
   | "ENTERTAINMENT"
   | "ALCOHOL"
+  | "VAPE"
   | "PET_CARE"
   | "BILLS"
   | "OTHER";
@@ -191,6 +192,7 @@ const CATEGORY_KEYS: RetrospectiveCategoryKey[] = [
   "GENERAL_MERCHANDISE",
   "ENTERTAINMENT",
   "ALCOHOL",
+  "VAPE",
   "PET_CARE",
   "BILLS",
   "OTHER",
@@ -202,6 +204,7 @@ const EMPTY_BY_CATEGORY: Record<RetrospectiveCategoryKey, number> = {
   GENERAL_MERCHANDISE: 0,
   ENTERTAINMENT: 0,
   ALCOHOL: 0,
+  VAPE: 0,
   PET_CARE: 0,
   BILLS: 0,
   OTHER: 0,
@@ -249,6 +252,8 @@ function bucketize(
       return "ENTERTAINMENT";
     case "ALCOHOL":
       return "ALCOHOL";
+    case "VAPE":
+      return "VAPE";
     case "PET_CARE":
       return "PET_CARE";
     default:

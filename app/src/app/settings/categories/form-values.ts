@@ -29,6 +29,7 @@ export const CATEGORY_OPTIONS: CategoryOption[] = [
   { value: "GENERAL_MERCHANDISE", label: "Shopping" },
   { value: "ENTERTAINMENT", label: "Entertainment" },
   { value: "ALCOHOL", label: "Alcohol" },
+  { value: "VAPE", label: "Vapes" },
   { value: "PET_CARE", label: "Pet Care" },
   { value: "TRANSPORTATION", label: "Transportation" },
   { value: "TRAVEL", label: "Travel" },
