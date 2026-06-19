@@ -97,6 +97,12 @@ export interface RetrospectiveData {
    * uses this for the "Not enough history yet" empty state.
    */
   notEnoughHistory: boolean;
+  /**
+   * Per-category spending series across all visible periods, oldest-first.
+   * Length always equals `periods.length`. Used by the page to render inline
+   * sparklines without re-deriving the series from the periods array.
+   */
+  categorySeriesMap: Record<RetrospectiveCategoryKey, number[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -407,8 +413,12 @@ export function getRetrospective(
       ? getCompletedMonths(today, count + 1)
       : getCompletedCycles(today, count + 1);
 
+  const emptyCategorySeriesMap = Object.fromEntries(
+    CATEGORY_KEYS.map((k) => [k, [] as number[]]),
+  ) as Record<RetrospectiveCategoryKey, number[]>;
+
   if (candidateWindows.length === 0) {
-    return { view, periods: [], notEnoughHistory: true };
+    return { view, periods: [], notEnoughHistory: true, categorySeriesMap: emptyCategorySeriesMap };
   }
 
   const billNames = loadBillNames();
@@ -421,7 +431,7 @@ export function getRetrospective(
   // "Not enough history" only trips when no visible period has any
   // activity at all. A single sparse period is still worth showing.
   if (!visible.some((p) => p.hasData)) {
-    return { view, periods: [], notEnoughHistory: true };
+    return { view, periods: [], notEnoughHistory: true, categorySeriesMap: emptyCategorySeriesMap };
   }
 
   const periods: PeriodSummary[] = visible.map((p, i) => {
@@ -446,7 +456,14 @@ export function getRetrospective(
     };
   });
 
-  return { view, periods, notEnoughHistory: false };
+  // Oldest-first series for each category across the visible periods.
+  // Derived from the already-computed periods array — no extra DB queries.
+  const orderedPeriods = [...periods].reverse();
+  const categorySeriesMap = Object.fromEntries(
+    CATEGORY_KEYS.map((key) => [key, orderedPeriods.map((p) => p.byCategory[key])]),
+  ) as Record<RetrospectiveCategoryKey, number[]>;
+
+  return { view, periods, notEnoughHistory: false, categorySeriesMap };
 }
 
 // Re-exported so the page can iterate in the spec'd order without

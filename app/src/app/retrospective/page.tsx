@@ -75,7 +75,7 @@ export default async function RetrospectivePage({ searchParams }: PageProps) {
               view={view}
               count={count}
             />
-            <PeriodList periods={data.periods} />
+            <PeriodList periods={data.periods} categorySeriesMap={data.categorySeriesMap} />
           </>
         )}
       </div>
@@ -217,13 +217,20 @@ function NetCashflowHero({
 // Expandable period rows
 // ---------------------------------------------------------------------------
 
-function PeriodList({ periods }: { periods: PeriodSummary[] }) {
+function PeriodList({
+  periods,
+  categorySeriesMap,
+}: {
+  periods: PeriodSummary[];
+  categorySeriesMap: Record<RetrospectiveCategoryKey, number[]>;
+}) {
   return (
     <section className="mt-12 space-y-3">
       {periods.map((p, i) => (
         <PeriodRow
           key={p.window.startDate}
           period={p}
+          categorySeriesMap={categorySeriesMap}
           // Most recent expanded by default; everything else collapsed so
           // the page reads as a scannable list of period summaries.
           defaultOpen={i === 0}
@@ -241,9 +248,11 @@ function netColourClass(net: number): string {
 
 function PeriodRow({
   period,
+  categorySeriesMap,
   defaultOpen,
 }: {
   period: PeriodSummary;
+  categorySeriesMap: Record<RetrospectiveCategoryKey, number[]>;
   defaultOpen: boolean;
 }) {
   return (
@@ -275,7 +284,7 @@ function PeriodRow({
       </summary>
 
       <div className="space-y-6 border-t border-stone-100 px-5 py-4">
-        <CategoryList period={period} />
+        <CategoryList period={period} categorySeriesMap={categorySeriesMap} />
         <TopTransactionsList period={period} />
         <ExternalHelpAndRepayments period={period} />
       </div>
@@ -342,6 +351,7 @@ interface CategoryRow {
     | { kind: "pct"; pct: number }
     | { kind: "none" }
     | null;
+  series: number[];
 }
 
 /**
@@ -349,12 +359,16 @@ interface CategoryRow {
  * the row), and `{kind: "none"}` when there's no prior at all (oldest
  * visible row with no history beyond — render the dollar only).
  */
-function buildCategoryRows(period: PeriodSummary): CategoryRow[] {
+function buildCategoryRows(
+  period: PeriodSummary,
+  categorySeriesMap: Record<RetrospectiveCategoryKey, number[]>,
+): CategoryRow[] {
   const rows: CategoryRow[] = [];
   for (const key of RETROSPECTIVE_CATEGORY_ORDER) {
     const recent = period.byCategory[key];
     const prior =
       period.priorByCategory !== null ? period.priorByCategory[key] : null;
+    const series = categorySeriesMap[key];
 
     if (prior === null) {
       // No prior period to compare against (oldest visible, no history
@@ -366,6 +380,7 @@ function buildCategoryRows(period: PeriodSummary): CategoryRow[] {
         recent,
         prior: null,
         delta: { kind: "none" },
+        series,
       });
       continue;
     }
@@ -378,6 +393,7 @@ function buildCategoryRows(period: PeriodSummary): CategoryRow[] {
         recent,
         prior,
         delta: { kind: "new" },
+        series,
       });
       continue;
     }
@@ -388,13 +404,20 @@ function buildCategoryRows(period: PeriodSummary): CategoryRow[] {
       recent,
       prior,
       delta: { kind: "pct", pct },
+      series,
     });
   }
   return rows;
 }
 
-function CategoryList({ period }: { period: PeriodSummary }) {
-  const rows = buildCategoryRows(period);
+function CategoryList({
+  period,
+  categorySeriesMap,
+}: {
+  period: PeriodSummary;
+  categorySeriesMap: Record<RetrospectiveCategoryKey, number[]>;
+}) {
+  const rows = buildCategoryRows(period, categorySeriesMap);
   if (rows.length === 0) return null;
 
   return (
@@ -444,10 +467,19 @@ function CategoryRowLi({ row }: { row: CategoryRow }) {
 
   return (
     <li className="rounded-md border border-stone-200 bg-stone-50 px-4 py-2">
-      <div className="flex items-center justify-between gap-3">
-        <div className="text-sm font-medium text-neutral-700">{row.label}</div>
-        <div className={`text-sm font-semibold tabular-nums ${colour}`}>
+      <div className="flex items-center gap-3">
+        <div className="flex-1 text-sm font-medium text-neutral-700">{row.label}</div>
+        <div className={`shrink-0 text-sm font-semibold tabular-nums ${colour}`}>
           {arrow ? `${arrow} ${text}` : text}
+        </div>
+        <div className="shrink-0 text-neutral-400">
+          <Sparkline
+            values={row.series}
+            width={80}
+            height={24}
+            className="h-6 w-20"
+            ariaLabel={`${row.label} spending trend`}
+          />
         </div>
       </div>
       {row.prior !== null && (
