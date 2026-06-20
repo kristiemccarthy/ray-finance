@@ -74,7 +74,31 @@
       "Bash(git reset *)",
       "Bash(git commit *)",
       "Bash(git --no-pager log -4 --stat --format='%h %s%n')",
-      "Bash(git --no-pager diff src/csv-import/recurring-detector.ts)"
+      "Bash(git --no-pager diff src/csv-import/recurring-detector.ts)",
+      "Bash(npx --yes tsx ./_gs.ts)",
+      "Read(//c/Users/krist/.ray/data/**)",
+      "Read(//c/Users/krist/.ray/**)",
+      "Bash(node dup-diagnose.mjs)",
+      "Bash(node dup-diagnose2.mjs)",
+      "Bash(node dup-killlist-dryrun.mjs)",
+      "Bash(node dup-execute.mjs)",
+      "Bash(xargs ls -la)",
+      "Bash(npm test *)",
+      "Bash(node phase2-probe.mjs)",
+      "Bash(ls -t ~/Downloads/*.pdf ~/Downloads/*.csv 2>/dev/null | head -20; echo \"=== ray data dir non-db files ===\"; ls -la ~/.ray/ 2>/dev/null; echo \"=== any imports/statements dir ===\"; ls -la ~/.ray/imports 2>/dev/null; find ~/.ray -name \"*.pdf\" -o -name \"*.csv\" 2>/dev/null | head)",
+      "Bash(node phase2-backfill.mjs)",
+      "Bash(echo \"BUILD_EXIT=$?\")",
+      "Bash(node personal-recon.mjs)",
+      "Bash(rm -f personal-recon.mjs)",
+      "Bash(echo \"APP_TSC_EXIT=$?\")",
+      "Bash(ls app/src/app/balances/)",
+      "Bash(find app/src -iname \"*balanc*\")",
+      "Bash(ls -la /c/Users/krist/Downloads/*.csv /c/Users/krist/Downloads/*.pdf 2>/dev/null | head -30)",
+      "Bash(sort -k6,7)",
+      "Bash(grep -iE \"\\\\.csv$\")",
+      "Bash(sort -k6,7 -r)",
+      "Bash(find /c/Users/krist -name \"St George*.csv\" -o -name \"Mojo*.csv\" 2>/dev/null | head -20)",
+      "PowerShell(cd \"C:\\\\Users\\\\krist\\\\Documents\\\\GitHub\\\\ray-finance\\\\app\"; if \\(Test-Path \".next\"\\) { $info = Get-Item \".next\"; \"EXISTS — last modified: $\\($info.LastWriteTime\\)\" } else { \"NOT FOUND\" } 2>&1)"
     ]
   }
 }
